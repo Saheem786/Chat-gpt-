@@ -14,20 +14,22 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.Collections
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.random.Random
 
 /**
- * Text-to-Speech (TTS) Engine wrapping Android's TextToSpeech class.
- * Provides voice output for Sam AI assistant with:
+ * Hardened Text-to-Speech (TTS) Engine wrapping Android's TextToSpeech class.
+ * Features:
+ * - Deterministic TTS Session Lifecycle
+ * - Exactly-Once session completion emission (sessionCompletionEmitted gate)
+ * - Utterance ID deduplication via thread-safe completedUtteranceIds set
+ * - Safe initialization fallback through centralized completion gate
  * - Dynamic language & locale fallback (Hindi / Indian English / US English)
- * - TTS Session Lifecycle (handles multi-chunk streaming without premature completion)
- * - Assistant state coordination (SPEAKING / IDLE)
- * - Rhythmic amplitude generation for Compose visualizers
- * - Safe initialization queueing and cleanup
  */
 class TextToSpeechEngine(
     context: Context,
@@ -47,10 +49,12 @@ class TextToSpeechEngine(
     private val isInitialized = AtomicBoolean(false)
     private val isSpeaking = AtomicBoolean(false)
     
-    // TTS Session state tracking for streaming Gemini responses
+    // TTS Session state tracking
     private var isStreamingSession = false
     private var streamingComplete = false
     private val pendingUtterances = AtomicInteger(0)
+    private val sessionCompletionEmitted = AtomicBoolean(false)
+    private val completedUtteranceIds = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
 
     private var amplitudeJob: Job? = null
     private var pendingSpeechText: String? = null
@@ -88,7 +92,6 @@ class TextToSpeechEngine(
             configureLocaleAndVoice()
             setupUtteranceListener()
 
-            // Process any queued speech text requested while engine was initializing
             pendingSpeechText?.let { queuedText ->
                 pendingSpeechText = null
                 speak(queuedText)
@@ -98,6 +101,8 @@ class TextToSpeechEngine(
             val errorMsg = "TTS initialization failed with status code: $status"
             Log.e(TAG, errorMsg)
             onDiagnosticLog(errorMsg)
+            // Centralized completion fallback
+            completeTtsSession()
         }
     }
 
@@ -173,23 +178,31 @@ class TextToSpeechEngine(
 
             override fun onDone(utteranceId: String?) {
                 onDiagnosticLog("TTS utterance finished (id: $utteranceId)")
-                val remaining = pendingUtterances.decrementAndGet()
-                checkSessionCompletion(remaining)
+                handleUtteranceCompletion(utteranceId)
             }
 
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
                 onDiagnosticLog("TTS utterance error on utterance: $utteranceId")
-                val remaining = pendingUtterances.decrementAndGet()
-                checkSessionCompletion(remaining)
+                handleUtteranceCompletion(utteranceId)
             }
 
             override fun onError(utteranceId: String?, errorCode: Int) {
                 onDiagnosticLog("TTS utterance error code $errorCode on utterance: $utteranceId")
-                val remaining = pendingUtterances.decrementAndGet()
-                checkSessionCompletion(remaining)
+                handleUtteranceCompletion(utteranceId)
             }
         })
+    }
+
+    private fun handleUtteranceCompletion(utteranceId: String?) {
+        val id = utteranceId ?: UUID.randomUUID().toString()
+        // Section 3: Utterance ID Deduplication - mutually exclusive with onDone/onError
+        if (completedUtteranceIds.add(id)) {
+            val remaining = pendingUtterances.decrementAndGet().coerceAtLeast(0)
+            checkSessionCompletion(remaining)
+        } else {
+            onDiagnosticLog("TTS duplicate callback ignored for utterance: $id")
+        }
     }
 
     fun speakWithIndianAccent(
@@ -211,6 +224,8 @@ class TextToSpeechEngine(
             if (isFirstChunk) {
                 isStreamingSession = true
                 streamingComplete = false
+                sessionCompletionEmitted.set(false)
+                completedUtteranceIds.clear()
                 pendingUtterances.set(0)
             }
             pendingUtterances.incrementAndGet()
@@ -245,6 +260,8 @@ class TextToSpeechEngine(
         synchronized(this) {
             isStreamingSession = false
             streamingComplete = true
+            sessionCompletionEmitted.set(false)
+            completedUtteranceIds.clear()
             pendingUtterances.set(1)
         }
         speakInternal(cleanText, queueMode, utteranceId)
@@ -274,14 +291,12 @@ class TextToSpeechEngine(
                 onDiagnosticLog("TTS queued utterance: '${cleanText.take(40)}...'")
             } else {
                 onDiagnosticLog("TTS speak call returned status: $result (fallback end)")
-                val remaining = pendingUtterances.decrementAndGet()
-                checkSessionCompletion(remaining)
+                handleUtteranceCompletion(utteranceId)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error invoking TextToSpeech.speak", e)
             onDiagnosticLog("TTS speak error: ${e.message}")
-            val remaining = pendingUtterances.decrementAndGet()
-            checkSessionCompletion(remaining)
+            handleUtteranceCompletion(utteranceId)
         }
     }
 
@@ -304,17 +319,22 @@ class TextToSpeechEngine(
     }
 
     private fun completeTtsSession() {
-        synchronized(this) {
-            isSpeaking.set(false)
-            isStreamingSession = false
-            streamingComplete = false
-            pendingUtterances.set(0)
-        }
-        stopAmplitudeSimulation()
-        onDiagnosticLog("TTS SESSION COMPLETE [all queued chunks finished speaking]")
-        scope.launch(Dispatchers.Main) {
-            onSpeechEnded()
-            onSpeechSessionEnded()
+        // Section 2: Exactly-Once session completion gate
+        if (sessionCompletionEmitted.compareAndSet(false, true)) {
+            synchronized(this) {
+                isSpeaking.set(false)
+                isStreamingSession = false
+                streamingComplete = false
+                pendingUtterances.set(0)
+            }
+            stopAmplitudeSimulation()
+            onDiagnosticLog("TTS SESSION COMPLETE [Exactly-Once event emitted]")
+            scope.launch(Dispatchers.Main) {
+                onSpeechEnded()
+                onSpeechSessionEnded()
+            }
+        } else {
+            onDiagnosticLog("TTS completeTtsSession called but session completion already emitted for this session")
         }
     }
 
@@ -331,9 +351,11 @@ class TextToSpeechEngine(
             pendingUtterances.set(0)
         }
         stopAmplitudeSimulation()
-        scope.launch(Dispatchers.Main) {
-            onSpeechEnded()
-            onSpeechSessionEnded()
+        if (sessionCompletionEmitted.compareAndSet(false, true)) {
+            scope.launch(Dispatchers.Main) {
+                onSpeechEnded()
+                onSpeechSessionEnded()
+            }
         }
         onDiagnosticLog("TTS stopped")
     }

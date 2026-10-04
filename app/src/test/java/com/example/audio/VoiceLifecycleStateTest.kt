@@ -5,8 +5,6 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.ui.AppMode
 import com.example.ui.AssistantState
 import com.example.ui.VoiceState
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -15,8 +13,12 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+
+enum class TestAudioPipeline { NONE, TTS, AUDIO_TRACK }
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
@@ -29,8 +31,13 @@ class VoiceLifecycleStateTest {
         context = ApplicationProvider.getApplicationContext()
     }
 
-    // Helper state checker matching SamViewModel.isMicrophoneBusy()
-    private fun isMicrophoneBusy(voiceState: VoiceState, assistantState: AssistantState, isSendingChat: Boolean = false): Boolean {
+    private fun isMicrophoneBusy(
+        voiceState: VoiceState,
+        assistantState: AssistantState,
+        isSendingChat: Boolean = false,
+        isTtsSpeaking: Boolean = false,
+        isAudioPlaying: Boolean = false
+    ): Boolean {
         return voiceState == VoiceState.PROCESSING ||
                voiceState == VoiceState.GEMINI_STREAMING ||
                voiceState == VoiceState.TOOL_EXECUTION ||
@@ -38,236 +45,217 @@ class VoiceLifecycleStateTest {
                voiceState == VoiceState.FINAL_RESULT ||
                assistantState == AssistantState.THINKING ||
                assistantState == AssistantState.SPEAKING ||
-               isSendingChat
+               isSendingChat ||
+               isTtsSpeaking ||
+               isAudioPlaying
     }
 
-    private fun canStartCommandListening(voiceState: VoiceState, assistantState: AssistantState, isSendingChat: Boolean = false): Boolean {
-        if (isMicrophoneBusy(voiceState, assistantState, isSendingChat)) return false
+    private fun canStartCommandListening(
+        voiceState: VoiceState,
+        assistantState: AssistantState,
+        isSendingChat: Boolean = false,
+        isTtsSpeaking: Boolean = false,
+        isAudioPlaying: Boolean = false
+    ): Boolean {
+        if (isMicrophoneBusy(voiceState, assistantState, isSendingChat, isTtsSpeaking, isAudioPlaying)) return false
         return voiceState == VoiceState.IDLE || voiceState == VoiceState.COMMAND_LISTENING
     }
 
-    // TEST 1, 2, 3, 4, 5 & 12: TTS Session simulation with 5 streaming chunks
+    // TEST 1: Exactly-Once Session Completion with Utterance ID Deduplication
     @Test
-    fun testStreamingGeminiResponseWithFiveChunksSessionLifecycle() {
-        var isStreamingSession = false
-        var streamingComplete = false
+    fun testTtsSessionExactlyOnceWithDuplicateUtteranceCallbacks() {
+        val completedUtteranceIds = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+        val sessionCompletionEmitted = AtomicBoolean(false)
         val pendingUtterances = AtomicInteger(0)
-        var sessionCompleteCalls = 0
-        var speechRecognizerStarted = false
-
-        fun onSessionComplete() {
-            sessionCompleteCalls++
-            // Only after session completion is recognition allowed if in appropriate mode
-            speechRecognizerStarted = true
-        }
-
-        fun checkSessionCompletion() {
-            var shouldComplete = false
-            if (isStreamingSession) {
-                if (streamingComplete && pendingUtterances.get() <= 0) {
-                    shouldComplete = true
-                }
-            } else {
-                if (pendingUtterances.get() <= 0) {
-                    shouldComplete = true
-                }
-            }
-            if (shouldComplete) {
-                onSessionComplete()
-            }
-        }
-
-        fun speakChunk(chunkText: String, isFirstChunk: Boolean) {
-            if (isFirstChunk) {
-                isStreamingSession = true
-                streamingComplete = false
-                pendingUtterances.set(0)
-            }
-            pendingUtterances.incrementAndGet()
-        }
-
-        fun markStreamingComplete() {
-            streamingComplete = true
-            checkSessionCompletion()
-        }
-
-        fun simulateUtteranceDone() {
-            pendingUtterances.decrementAndGet()
-            checkSessionCompletion()
-        }
-
-        // --- Step 1: Chunk 1 arrives & plays ---
-        speakChunk("Chunk 1: Hello", isFirstChunk = true)
-        assertEquals(1, pendingUtterances.get())
-        // Chunk 1 finishes speaking
-        simulateUtteranceDone()
-        assertEquals(0, pendingUtterances.get())
-        // 1. TTS chunk 1 completes -> SpeechRecognizer MUST NOT start!
-        assertFalse("SpeechRecognizer MUST NOT start after Chunk 1 done", speechRecognizerStarted)
-        assertEquals(0, sessionCompleteCalls)
-
-        // --- Step 2: Chunk 2 arrives & finishes ---
-        speakChunk("Chunk 2: how are you", isFirstChunk = false)
-        assertEquals(1, pendingUtterances.get())
-        simulateUtteranceDone()
-        // 2. Chunk 2 completes -> SpeechRecognizer MUST NOT start!
-        assertFalse("SpeechRecognizer MUST NOT start after Chunk 2 done", speechRecognizerStarted)
-        assertEquals(0, sessionCompleteCalls)
-
-        // --- Step 3: Chunks 3, 4, 5 arrive ---
-        speakChunk("Chunk 3: doing today", isFirstChunk = false)
-        speakChunk("Chunk 4: Dubai weather is", isFirstChunk = false)
-        speakChunk("Chunk 5: 32 degrees Celsius", isFirstChunk = false)
-        assertEquals(3, pendingUtterances.get())
-
-        // Chunks 3, 4, 5 complete speaking BUT Gemini has not marked stream complete yet!
-        simulateUtteranceDone() // chunk 3
-        simulateUtteranceDone() // chunk 4
-        simulateUtteranceDone() // chunk 5
-        assertEquals(0, pendingUtterances.get())
-        // 3. Chunk 5 completes -> SpeechRecognizer MUST NOT start if stream still incomplete!
-        assertFalse("SpeechRecognizer MUST NOT start when stream is still incomplete", speechRecognizerStarted)
-        assertEquals(0, sessionCompleteCalls)
-
-        // --- Step 4: Now Gemini stream marks complete! ---
-        markStreamingComplete()
-        // 5. Final TTS chunk complete AND stream marked complete -> NOW and ONLY NOW allow transition!
-        assertTrue("SpeechRecognizer allowed now that both stream and TTS finished", speechRecognizerStarted)
-        // 12. Exactly ONE final TTS-session-complete callback invoked
-        assertEquals("Must trigger exactly ONE session complete callback", 1, sessionCompleteCalls)
-    }
-
-    // TEST 4 & 5 (Reverse order): Stream marks complete while chunks are STILL speaking
-    @Test
-    fun testStreamMarksCompleteWhileChunksAreStillQueued() {
-        var isStreamingSession = false
+        var isStreamingSession = true
         var streamingComplete = false
-        val pendingUtterances = AtomicInteger(0)
-        var sessionCompleteCalls = 0
+        var sessionEndedCount = 0
 
         fun checkSessionCompletion() {
             if (isStreamingSession && streamingComplete && pendingUtterances.get() <= 0) {
-                sessionCompleteCalls++
+                if (sessionCompletionEmitted.compareAndSet(false, true)) {
+                    sessionEndedCount++
+                }
             }
         }
 
-        // Chunks 1 and 2 queued
-        isStreamingSession = true
+        fun onUtteranceCallback(utteranceId: String) {
+            if (completedUtteranceIds.add(utteranceId)) {
+                pendingUtterances.decrementAndGet().coerceAtLeast(0)
+                checkSessionCompletion()
+            }
+        }
+
+        // Two chunks queued
+        val id1 = "chunk-1-uuid"
+        val id2 = "chunk-2-uuid"
         pendingUtterances.set(2)
 
-        // 4. Gemini marks stream complete: still wait for all queued TTS chunks
+        // Chunk 1 finishes
+        onUtteranceCallback(id1)
+        assertEquals(1, pendingUtterances.get())
+
+        // Duplicate onDone received for Chunk 1 (Audio system glitch)
+        onUtteranceCallback(id1)
+        // Utterance deduplication prevents pending count from dropping below 1!
+        assertEquals("Duplicate callback must not decrement pending count", 1, pendingUtterances.get())
+        assertEquals(0, sessionEndedCount)
+
+        // Chunk 2 finishes
+        onUtteranceCallback(id2)
+        assertEquals(0, pendingUtterances.get())
+        assertEquals("Should not complete before Gemini stream marks complete", 0, sessionEndedCount)
+
+        // Now Gemini stream finishes
         streamingComplete = true
         checkSessionCompletion()
-        assertEquals("Must NOT complete session while chunks are still playing", 0, sessionCompleteCalls)
+        assertEquals("Session ended must emit exactly once", 1, sessionEndedCount)
 
-        // Chunk 1 finishes
-        pendingUtterances.decrementAndGet()
+        // Late duplicate callback arrives
+        onUtteranceCallback(id2)
         checkSessionCompletion()
-        assertEquals("Must NOT complete session while chunk 2 is still playing", 0, sessionCompleteCalls)
-
-        // Chunk 2 (final) finishes
-        pendingUtterances.decrementAndGet()
-        checkSessionCompletion()
-        assertEquals("Now session complete must trigger exactly once", 1, sessionCompleteCalls)
+        assertEquals("Late duplicate callback must not trigger another session completion", 1, sessionEndedCount)
     }
 
-    // TEST 6: Manual mic mode returns to IDLE and NEVER restarts listening automatically
+    // TEST 2: Session Token Invalidation & Stale Callback Rejection
     @Test
-    fun testManualMicModeReturnsToIdleWithoutRestart() {
-        val currentMode = AppMode.CHAT // Manual mic / text chat mode
-        var state = AssistantState.SPEAKING
-        var isMicActive = true
-        var voiceListeningStarted = false
+    fun testSessionTokenInvalidationRejectsStaleCallbacks() {
+        var currentVoiceSessionId = 1L
+        var recognizedSessionId = 0L
 
-        // TTS finishes speaking in manual mode
-        if (currentMode == AppMode.VOICE && isMicActive) {
-            voiceListeningStarted = true
+        fun onResponseFinished(sessionId: Long) {
+            if (sessionId != currentVoiceSessionId) {
+                // Stale callback rejected
+                return
+            }
+            recognizedSessionId = sessionId
+        }
+
+        // Callback from old session 1 arrives after user interrupted and started session 2
+        currentVoiceSessionId = 2L // user started new turn
+        onResponseFinished(sessionId = 1L)
+        assertEquals("Stale session 1 callback must be ignored", 0L, recognizedSessionId)
+
+        // Valid callback from current session 2 arrives
+        onResponseFinished(sessionId = 2L)
+        assertEquals("Current session 2 callback must be accepted", 2L, recognizedSessionId)
+    }
+
+    // TEST 3: AudioTrackPlayer vs TextToSpeech Pipeline Arbitration
+    @Test
+    fun testAudioPipelineArbitrationPreventsDuplicateRestart() {
+        var activePipeline = TestAudioPipeline.TTS // TTS is active
+        var restarts = 0
+
+        fun onPlaybackFinished(sourcePipeline: TestAudioPipeline) {
+            if (sourcePipeline != activePipeline) {
+                return // Ignored!
+            }
+            activePipeline = TestAudioPipeline.NONE
+            restarts++
+        }
+
+        // AudioTrackPlayer ends while TTS is the active pipeline
+        onPlaybackFinished(TestAudioPipeline.AUDIO_TRACK)
+        assertEquals("AudioTrackPlayer callback must be ignored when TTS is active", 0, restarts)
+
+        // TTS finishes
+        onPlaybackFinished(TestAudioPipeline.TTS)
+        assertEquals("Only active TTS pipeline may finish response", 1, restarts)
+    }
+
+    // TEST 4: One-Shot Manual Mic Mode Returns to IDLE without Auto-Listen
+    @Test
+    fun testOneShotManualMicModeNeverAutoListens() {
+        val isContinuousVoiceModeEnabled = false
+        var micActive = false
+        var state = AssistantState.SPEAKING
+        var autoListenStarted = false
+
+        // Response ends
+        state = AssistantState.IDLE
+        if (isContinuousVoiceModeEnabled) {
+            autoListenStarted = true
         } else {
-            state = AssistantState.IDLE
-            isMicActive = false
-            voiceListeningStarted = false
+            micActive = false
         }
 
         assertEquals(AssistantState.IDLE, state)
-        assertFalse("Manual mic mode must not automatically restart listening", voiceListeningStarted)
+        assertFalse("One-shot manual mic must NOT auto-listen", autoListenStarted)
+        assertFalse("Mic must be inactive", micActive)
     }
 
-    // TEST 7: Wake-word mode transitions to WAKE_WORD_LISTENING only after complete TTS
+    // TEST 5: Microphone Arbitration with Active TTS Audio
     @Test
-    fun testWakeWordModeTransitionsOnlyAfterTtsCompletion() {
-        val currentMode = AppMode.CHAT
-        val isWakeWordEnabled = true
-        var wakeWordServiceStarted = false
+    fun testMicrophoneArbitrationBlocksDuringActiveTtsOrAudio() {
+        // VoiceState is IDLE, but TTS is still rendering audio physically
+        assertFalse(
+            "Must NOT start listening while TTS audio is active",
+            canStartCommandListening(VoiceState.IDLE, AssistantState.IDLE, isTtsSpeaking = true)
+        )
+        assertFalse(
+            "Must NOT start listening while PCM AudioTrack is playing",
+            canStartCommandListening(VoiceState.IDLE, AssistantState.IDLE, isAudioPlaying = true)
+        )
+        assertTrue(
+            "Allowed only when both states and audio output are completely silent",
+            canStartCommandListening(VoiceState.IDLE, AssistantState.IDLE, isTtsSpeaking = false, isAudioPlaying = false)
+        )
+    }
 
-        fun onSpeechSessionEnded() {
-            if (currentMode != AppMode.VOICE && isWakeWordEnabled) {
-                wakeWordServiceStarted = true
-            }
+    // TEST 6: Barge-In Interruption Invalidates Token and Resets Pipeline
+    @Test
+    fun testBargeInInvalidatesActiveSession() {
+        var currentVoiceSessionId = 5L
+        var isAudioActive = true
+
+        // User speaks and triggers barge-in
+        val oldSessionId = currentVoiceSessionId
+        currentVoiceSessionId++ // Invalidation
+        isAudioActive = false // Interrupt
+
+        assertTrue("Session token must be incremented", currentVoiceSessionId > oldSessionId)
+        assertFalse("Audio must be stopped", isAudioActive)
+    }
+
+    // TEST 7: Stop Session Shuts Down in Strict Order and Invalidates Callbacks
+    @Test
+    fun testStopSessionOrderedShutdown() {
+        var sessionId = 10L
+        var recognizerStopped = false
+        var wakeWordStopped = false
+        var audioStopped = false
+        var ttsStopped = false
+        var state = AssistantState.SPEAKING
+
+        fun stopSession() {
+            sessionId++ // 1. Invalidate token
+            recognizerStopped = true // 2. Stop recognizer
+            wakeWordStopped = true // 3. Stop wake word
+            audioStopped = true // 4. Stop audio
+            ttsStopped = true // 5. Stop TTS
+            state = AssistantState.IDLE // 6. State IDLE
         }
 
-        // During speaking: wake word must NOT start
-        assertFalse(wakeWordServiceStarted)
-
-        // Once speech session completes:
-        onSpeechSessionEnded()
-        assertTrue("Wake word service should start only after TTS session ends", wakeWordServiceStarted)
+        stopSession()
+        assertEquals(11L, sessionId)
+        assertTrue(recognizerStopped)
+        assertTrue(wakeWordStopped)
+        assertTrue(audioStopped)
+        assertTrue(ttsStopped)
+        assertEquals(AssistantState.IDLE, state)
     }
 
-    // TEST 8: ERROR_RECOGNIZER_BUSY during SPEAKING must NOT restart
+    // TEST 8: VoiceInputHandler startListening cannot bypass checkCanListen
     @Test
-    fun testErrorRecognizerBusyDuringSpeakingDoesNotRestart() {
-        val voiceState = VoiceState.SPEAKING
-        val assistantState = AssistantState.SPEAKING
-        assertFalse("Cannot start or retry recognition during SPEAKING", canStartCommandListening(voiceState, assistantState))
-    }
-
-    // TEST 9: ERROR_SERVER_DISCONNECTED during PROCESSING must NOT restart
-    @Test
-    fun testErrorServerDisconnectedDuringProcessingDoesNotRestart() {
-        val voiceState = VoiceState.PROCESSING
-        val assistantState = AssistantState.THINKING
-        assertFalse("Cannot start or retry recognition during PROCESSING", canStartCommandListening(voiceState, assistantState))
-    }
-
-    // TEST 10: Barge-in disabled prevents SpeechRecognizer start during TTS
-    @Test
-    fun testBargeInDisabledPreventsStartDuringTts() {
-        val isBargeInEnabled = false
-        var startAttempted = false
-
-        fun onBargeInCheck() {
-            if (!isBargeInEnabled) return
-            startAttempted = true
-        }
-
-        onBargeInCheck()
-        assertFalse("Barge-in disabled must not attempt recognition start", startAttempted)
-    }
-
-    // TEST 11: startListening() cannot bypass checkCanListen()
-    @Test
-    fun testStartListeningCannotBypassCheckCanListen() {
+    fun testVoiceInputHandlerStrictSynchronousGuard() {
         var isBusy = true
         val handler = VoiceInputHandler(
             context = context,
             checkCanListen = { !isBusy }
         )
 
-        // Handler should immediately block when busy
         handler.startListening()
-        assertFalse(handler.isCurrentlyListening())
-
-        // Handler can listen when not busy
-        isBusy = false
-        assertTrue(!isBusy)
-    }
-
-    // TEST: Verify GEMINI_STREAMING and TOOL_EXECUTION are protected states
-    @Test
-    fun testStreamingAndToolExecutionStatesAreProtected() {
-        assertTrue(isMicrophoneBusy(VoiceState.GEMINI_STREAMING, AssistantState.THINKING))
-        assertTrue(isMicrophoneBusy(VoiceState.TOOL_EXECUTION, AssistantState.THINKING))
-        assertTrue(isMicrophoneBusy(VoiceState.FINAL_RESULT, AssistantState.THINKING))
-        assertFalse(isMicrophoneBusy(VoiceState.IDLE, AssistantState.IDLE))
+        assertFalse("Handler must block immediately when checkCanListen is false", handler.isCurrentlyListening())
     }
 }

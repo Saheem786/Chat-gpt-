@@ -184,8 +184,15 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private enum class ResponseAudioPipeline { NONE, TTS, AUDIO_TRACK }
+    private var currentVoiceSessionId = 0L
+    private var activeAudioPipeline = ResponseAudioPipeline.NONE
+    private var isContinuousVoiceModeEnabled = false
+
     fun isMicrophoneBusy(): Boolean {
         val st = _uiState.value.state
+        val isTtsSpeaking = ttsEngine?.isSpeakingNow() == true
+        val isAudioPlaying = audioPlayer?.isAudioPlaying() == true
         return currentVoiceState == VoiceState.PROCESSING ||
                currentVoiceState == VoiceState.GEMINI_STREAMING ||
                currentVoiceState == VoiceState.TOOL_EXECUTION ||
@@ -193,12 +200,14 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
                currentVoiceState == VoiceState.FINAL_RESULT ||
                st == AssistantState.THINKING ||
                st == AssistantState.SPEAKING ||
-               _uiState.value.isSendingChat
+               _uiState.value.isSendingChat ||
+               isTtsSpeaking ||
+               isAudioPlaying
     }
 
     fun startCommandListeningIfAllowed(): Boolean {
         if (isMicrophoneBusy()) {
-            addLog("startCommandListeningIfAllowed BLOCKED: microphone busy (currentVoiceState=$currentVoiceState, assistantState=${_uiState.value.state})")
+            addLog("startCommandListeningIfAllowed BLOCKED: microphone busy (currentVoiceState=$currentVoiceState, assistantState=${_uiState.value.state}, ttsSpeaking=${ttsEngine?.isSpeakingNow()}, audioPlaying=${audioPlayer?.isAudioPlaying()})")
             return false
         }
         if (currentVoiceState != VoiceState.IDLE && currentVoiceState != VoiceState.COMMAND_LISTENING) {
@@ -210,6 +219,43 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
         addLog("VOICE_STATE: COMMAND_LISTENING [RECOGNIZER_START]")
         voiceInputHandler?.startListening()
         return true
+    }
+
+    private fun onAuthoritativeResponseFinished(sourcePipeline: ResponseAudioPipeline, sessionId: Long) {
+        if (sessionId != currentVoiceSessionId) {
+            addLog("Ignoring stale response finish callback (source=$sourcePipeline, callbackSession=$sessionId, activeSession=$currentVoiceSessionId)")
+            return
+        }
+        if (sourcePipeline != activeAudioPipeline) {
+            addLog("Ignoring non-active audio pipeline finish (source=$sourcePipeline, activePipeline=$activeAudioPipeline)")
+            return
+        }
+        activeAudioPipeline = ResponseAudioPipeline.NONE
+        stopBargeInMonitor()
+
+        addLog("VOICE_STATE: RESPONSE_FINISHED [Session $sessionId complete]")
+        currentVoiceState = VoiceState.IDLE
+
+        val context = getApplication<Application>().applicationContext
+        val prefs = context.getSharedPreferences("sam_prefs", Context.MODE_PRIVATE)
+        val isWakeWordOn = prefs.getBoolean("wake_word_enabled", false)
+
+        if (isContinuousVoiceModeEnabled && _uiState.value.currentMode == AppMode.VOICE) {
+            _uiState.update {
+                it.copy(
+                    state = AssistantState.LISTENING,
+                    amplitude = 0f,
+                    actionBanner = "JARVIS is listening..."
+                )
+            }
+            startCommandListeningIfAllowed()
+        } else {
+            // One-shot manual mic mode: Return directly to IDLE, do NOT auto-listen!
+            _uiState.update { it.copy(state = AssistantState.IDLE, amplitude = 0f, isMicActive = false) }
+            if (isWakeWordOn && !isMicrophoneBusy()) {
+                startWakeWordService()
+            }
+        }
     }
 
     private val _uiState = MutableStateFlow(SamUiState())
@@ -527,36 +573,13 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
             onPlaybackStarted = {
                 _uiState.update { it.copy(state = AssistantState.SPEAKING) }
                 currentVoiceState = VoiceState.SPEAKING
-                addLog("VOICE_STATE: SPEAKING [TTS_START]")
+                addLog("VOICE_STATE: SPEAKING [AUDIO_START]")
                 addLog("Speaker playback started - UI state changed to SPEAKING")
                 startBargeInMonitor()
             },
             onPlaybackEnded = {
-                stopBargeInMonitor()
-                addLog("VOICE_STATE: IDLE [TTS_DONE]")
-                currentVoiceState = VoiceState.IDLE
-                
-                val context = getApplication<Application>().applicationContext
-                val prefs = context.getSharedPreferences("sam_prefs", Context.MODE_PRIVATE)
-                val isWakeWordOn = prefs.getBoolean("wake_word_enabled", false)
-
-                if (_uiState.value.currentMode == AppMode.VOICE && _uiState.value.isMicActive) {
-                    _uiState.update {
-                        it.copy(
-                            state = AssistantState.LISTENING,
-                            amplitude = 0f,
-                            actionBanner = "JARVIS is listening..."
-                        )
-                    }
-                    startCommandListeningIfAllowed()
-                } else {
-                    val nextState = if (_uiState.value.isMicActive) AssistantState.LISTENING else AssistantState.IDLE
-                    _uiState.update { it.copy(state = nextState, amplitude = 0f) }
-                    if (isWakeWordOn) {
-                        startWakeWordService()
-                    }
-                }
-                addLog("Speaker playback ended")
+                addLog("Speaker playback ended callback received for Session $currentVoiceSessionId")
+                onAuthoritativeResponseFinished(ResponseAudioPipeline.AUDIO_TRACK, currentVoiceSessionId)
             },
             onAmplitudeChanged = { amp ->
                 if (_uiState.value.state == AssistantState.SPEAKING) {
@@ -583,31 +606,8 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
                 addLog("TTS individual utterance finished")
             },
             onSpeechSessionEnded = {
-                addLog("TTS SESSION COMPLETE: Assistant response finished speaking")
-                stopBargeInMonitor()
-                
-                addLog("VOICE_STATE: IDLE [TTS_DONE]")
-                currentVoiceState = VoiceState.IDLE
-                
-                val context = getApplication<Application>().applicationContext
-                val prefs = context.getSharedPreferences("sam_prefs", Context.MODE_PRIVATE)
-                val isWakeWordOn = prefs.getBoolean("wake_word_enabled", false)
-
-                if (_uiState.value.currentMode == AppMode.VOICE && _uiState.value.isMicActive) {
-                    _uiState.update {
-                        it.copy(
-                            state = AssistantState.LISTENING,
-                            amplitude = 0f,
-                            actionBanner = "JARVIS is listening..."
-                        )
-                    }
-                    startCommandListeningIfAllowed()
-                } else {
-                    _uiState.update { it.copy(state = AssistantState.IDLE, amplitude = 0f) }
-                    if (isWakeWordOn) {
-                        startWakeWordService()
-                    }
-                }
+                addLog("TTS SESSION COMPLETE callback received for Session $currentVoiceSessionId")
+                onAuthoritativeResponseFinished(ResponseAudioPipeline.TTS, currentVoiceSessionId)
             },
             onAmplitudeChanged = { amp ->
                 if (_uiState.value.state == AssistantState.SPEAKING) {
@@ -1431,13 +1431,17 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
 
     fun stopSession() {
         addLog("User stopped voice session")
-        voiceInputHandler?.stopListening()
+        currentVoiceSessionId++ // 1. Invalidate active session token
+        activeAudioPipeline = ResponseAudioPipeline.NONE
+        voiceInputHandler?.stopListening() // 2. Stop recognizer
+        stopWakeWordService() // 3. Stop wake word
         micRecorder?.stop()
-        audioPlayer?.interrupt()
-        ttsEngine?.stop()
+        audioPlayer?.interrupt() // 4. Stop audio playback
+        ttsEngine?.stop() // 5. Stop TTS
         geminiService?.disconnect()
+        stopBargeInMonitor() // 6. Cancel pending monitors/retries
         
-        currentVoiceState = VoiceState.IDLE
+        currentVoiceState = VoiceState.IDLE // 7. Set state IDLE
         addLog("VOICE_STATE: IDLE [RECOGNIZER_STOP]")
         
         _uiState.update {
@@ -1449,11 +1453,11 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         
-        // Restart wake word if enabled
+        // 8. Optionally restart wake-word ONLY if explicitly enabled and allowed
         val context = getApplication<Application>().applicationContext
         val prefs = context.getSharedPreferences("sam_prefs", Context.MODE_PRIVATE)
         val isWakeWordOn = prefs.getBoolean("wake_word_enabled", false)
-        if (isWakeWordOn) {
+        if (isWakeWordOn && !isMicrophoneBusy()) {
             startWakeWordService()
         }
     }
@@ -2836,12 +2840,14 @@ $tempo beats per minute, fading out...
                     geminiService?.sendUserText(text)
                     replyText = ""
                 } else {
+                    val thisSessionId = ++currentVoiceSessionId
+                    activeAudioPipeline = ResponseAudioPipeline.TTS
                     var streamedChunksCount = 0
                     val onChunkAvailable: (String, Boolean) -> Unit = { chunk, isFirst ->
                         streamedChunksCount++
                         if (isFirst) {
                             currentVoiceState = VoiceState.GEMINI_STREAMING
-                            addLog("VOICE_STATE: GEMINI_STREAMING")
+                            addLog("VOICE_STATE: GEMINI_STREAMING (Session $thisSessionId)")
                         }
                         if (_uiState.value.currentMode == AppMode.VOICE) {
                             if (isFirst) {
@@ -2894,9 +2900,10 @@ $tempo beats per minute, fading out...
 
                         if (_uiState.value.currentMode == AppMode.VOICE) {
                             if (!responseAudio.isNullOrEmpty()) {
+                                activeAudioPipeline = ResponseAudioPipeline.AUDIO_TRACK
                                 audioPlayer?.enqueueChunk(responseAudio)
                             } else if (streamedChunksCount == 0) {
-                                // Full speech playback when not streamed in chunks
+                                activeAudioPipeline = ResponseAudioPipeline.TTS
                                 speakMessage(replyText)
                             }
                         } else {
@@ -3087,6 +3094,9 @@ $tempo beats per minute, fading out...
                                 if (normalizedRms > 0.07) {
                                     Log.i("BargeInMonitor", "Voice barge-in trigger met: RMS = $normalizedRms! Stopping playback...")
                                     withContext(Dispatchers.Main) {
+                                        stopBargeInMonitor()
+                                        currentVoiceSessionId++ // Invalidate active session token
+                                        activeAudioPipeline = ResponseAudioPipeline.NONE
                                         ttsEngine?.stop()
                                         audioPlayer?.interrupt()
 
@@ -3097,7 +3107,6 @@ $tempo beats per minute, fading out...
                                                 actionBanner = "Haan yaar, bolo! Listening..."
                                             )
                                         }
-                                        stopBargeInMonitor()
                                         currentVoiceState = VoiceState.IDLE
                                         startCommandListeningIfAllowed()
                                     }
