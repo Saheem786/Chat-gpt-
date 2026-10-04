@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">JARVIS AI</string>
+    <string name="accessibility_desc">JARVIS screen reading and multimodal visual analysis assistant.</string>
+</resources>

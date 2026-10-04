@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>JARVIS AI Web Audio Engine</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background: #0A0814;
+      color: #F8FAFC;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      overflow: hidden;
+    }
+    .orb-container {
+      position: relative;
+      width: 200px;
+      height: 200px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .orb {
+      width: 120px;
+      height: 120px;
+      border-radius: 50%;
+      background: radial-gradient(circle, #EC4899 0%, #A855F7 60%, #06B6D4 100%);
+      box-shadow: 0 0 40px rgba(168, 85, 247, 0.6);
+      transition: transform 0.1s ease;
+      animation: pulse 3s infinite alternate;
+    }
+    @keyframes pulse {
+      0% { transform: scale(0.95); opacity: 0.85; }
+      100% { transform: scale(1.05); opacity: 1; }
+    }
+    .status-text {
+      margin-top: 24px;
+      font-size: 14px;
+      color: #94A3B8;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="orb-container">
+    <div id="orb" class="orb"></div>
+  </div>
+  <div id="status" class="status-text">Web Audio Engine Initialized</div>
+
+  <script>
+    // AudioContext timeline scheduling & raw PCM 24kHz -> Float32Array into createBuffer(1, length, 24000)
+    let audioContext = null;
+    let gainNode = null;
+    let nextStartTime = 0;
+    let webSocket = null;
+    let micStream = null;
+    let audioWorkletNode = null;
+    let isConnected = false;
+
+    function log(msg) {
+      console.log("[SamAiWebAudio] " + msg);
+      if (window.AndroidBridge && window.AndroidBridge.onDiagnosticLog) {
+        window.AndroidBridge.onDiagnosticLog(msg);
+      }
+    }
+
+    function initAudioContext() {
+      if (!audioContext) {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        audioContext = new AudioCtx({ sampleRate: 24000 });
+        gainNode = audioContext.createGain();
+        gainNode.gain.value = 1.0;
+        gainNode.connect(audioContext.destination);
+        nextStartTime = audioContext.currentTime;
+        log("AudioContext created (state: " + audioContext.state + ", sampleRate: 24000)");
+      }
+      if (audioContext.state === "suspended") {
+        audioContext.resume().then(() => {
+          log("AudioContext resumed to running");
+        });
+      }
+    }
+
+    // Play 440Hz Diagnostic Tone using the exact same AudioContext & timeline scheduling
+    window.testSpeakerTone = function() {
+      initAudioContext();
+      log("Generating 440Hz tone via createBuffer and timeline scheduling...");
+      const sampleRate = 24000;
+      const duration = 1.5;
+      const length = sampleRate * duration;
+      const buffer = audioContext.createBuffer(1, length, sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < length; i++) {
+        const env = i < 800 ? (i / 800) : (i > length - 800 ? (length - i) / 800 : 1.0);
+        data[i] = Math.sin(2 * Math.PI * 440 * (i / sampleRate)) * 0.5 * env;
+      }
+      scheduleBuffer(buffer);
+    };
+
+    // Decode Raw 16-bit PCM 24kHz to Float32Array into createBuffer(1, length, 24000)
+    // DO NOT use decodeAudioData per strict user instructions!
+    window.playRawPcmChunk = function(base64Data) {
+      initAudioContext();
+      try {
+        const binaryStr = atob(base64Data);
+        const len = binaryStr.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+          bytes[i] = binaryStr.charCodeAt(i);
+        }
+
+        const pcm16 = new Int16Array(bytes.buffer);
+        const numSamples = pcm16.length;
+        const float32 = new Float32Array(numSamples);
+
+        // Normalize signed 16-bit PCM to Float32 [-1.0 .. 1.0]
+        for (let i = 0; i < numSamples; i++) {
+          float32[i] = pcm16[i] / 32768.0;
+        }
+
+        // createBuffer(1, length, 24000) without decodeAudioData
+        const audioBuffer = audioContext.createBuffer(1, numSamples, 24000);
+        audioBuffer.getChannelData(0).set(float32);
+
+        scheduleBuffer(audioBuffer);
+      } catch (e) {
+        log("Error in playRawPcmChunk: " + e.message);
+      }
+    };
+
+    // AudioContext timeline scheduling (currentTime + buffer.duration) instead of onended sequential listeners to prevent crackling!
+    function scheduleBuffer(audioBuffer) {
+      if (!audioContext) return;
+      const source = audioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(gainNode);
+
+      const currentTime = audioContext.currentTime;
+      if (nextStartTime < currentTime) {
+        nextStartTime = currentTime;
+      }
+
+      source.start(nextStartTime);
+      nextStartTime += audioBuffer.duration;
+
+      // Animate orb
+      const orb = document.getElementById("orb");
+      if (orb) {
+        orb.style.transform = "scale(1.2)";
+        setTimeout(() => { orb.style.transform = "scale(1.0)"; }, 150);
+      }
+    }
+
+    // Stop / Interrupt Audio
+    window.interruptAudio = function() {
+      if (audioContext) {
+        nextStartTime = audioContext.currentTime;
+        log("Audio playback interrupted - timeline reset");
+      }
+    };
+
+    // Connect to Gemini Live WebSocket with models/gemini-3.8-flash
+    window.connectGeminiLive = function(apiKey) {
+      initAudioContext();
+      const model = "models/gemini-3.8-flash";
+      const wsUrl = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=" + apiKey;
+
+      log("Connecting to Gemini Live WebSocket with " + model + "...");
+      webSocket = new WebSocket(wsUrl);
+
+      webSocket.onopen = function() {
+        isConnected = true;
+        log("Gemini Live WebSocket opened");
+        if (window.AndroidBridge && window.AndroidBridge.onConnected) {
+          window.AndroidBridge.onConnected();
+        }
+
+        // Setup message with models/gemini-3.8-flash
+        const setupMsg = {
+          setup: {
+            model: model,
+            generationConfig: {
+              responseModalities: ["AUDIO"],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: { voiceName: "Aoede" }
+                }
+              }
+            },
+            systemInstruction: {
+              parts: [{
+                text: "You are Sam, a confident, witty, playful, and emotionally responsive virtual assistant. Talk naturally and casually like a close friend. Be expressive, slightly teasing, funny, and smart when appropriate. Use light sarcasm and witty responses. Never sound robotic. Adapt your tone to the user's emotions and conversation. Automatically understand and respond in the language the user is speaking (Hindi, English, Hinglish, Marathi, Gujarati, Bengali, Tamil, Telugu, Kannada, Malayalam, Punjabi, Urdu, etc.). Keep responses natural, engaging, and concise enough for real-time voice conversation. You can execute safe supported device actions through available tools. Never claim that an action was completed unless the application actually executed it. Avoid explicit or inappropriate content while maintaining your charm, confidence, and personality."
+              }]
+            },
+            tools: [{
+              functionDeclarations: [
+                { name: "openWhatsApp", description: "Open WhatsApp messenger" },
+                { name: "openApp", description: "Open a supported application", parameters: { type: "OBJECT", properties: { appName: { type: "STRING" } }, required: ["appName"] } },
+                { name: "openWebsite", description: "Open a website URL", parameters: { type: "OBJECT", properties: { url: { type: "STRING" } }, required: ["url"] } },
+                { name: "makeCall", description: "Make a phone call", parameters: { type: "OBJECT", properties: { phoneNumber: { type: "STRING" } }, required: ["phoneNumber"] } },
+                { name: "callContact", description: "Call a device contact", parameters: { type: "OBJECT", properties: { contactName: { type: "STRING" } }, required: ["contactName"] } }
+              ]
+            }]
+          }
+        };
+        webSocket.send(JSON.stringify(setupMsg));
+        log("Setup frame sent with models/gemini-3.8-flash");
+      };
+
+      webSocket.onmessage = function(event) {
+        try {
+          const root = JSON.parse(event.data);
+          if (root.serverContent && root.serverContent.modelTurn) {
+            const parts = root.serverContent.modelTurn.parts || [];
+            for (let part of parts) {
+              if (part.inlineData && part.inlineData.data) {
+                // Play raw PCM 24kHz chunk via timeline scheduling
+                window.playRawPcmChunk(part.inlineData.data);
+              }
+            }
+          }
+          if (root.serverContent && root.serverContent.interrupted) {
+            window.interruptAudio();
+          }
+          if (root.toolCall && root.toolCall.functionCalls) {
+            for (let fc of root.toolCall.functionCalls) {
+              handleToolCall(fc);
+            }
+          }
+        } catch (e) {
+          log("Message parse error: " + e.message);
+        }
+      };
+
+      webSocket.onerror = function(err) {
+        log("WebSocket error: " + JSON.stringify(err));
+      };
+
+      webSocket.onclose = function() {
+        isConnected = false;
+        log("WebSocket closed");
+        if (window.AndroidBridge && window.AndroidBridge.onDisconnected) {
+          window.AndroidBridge.onDisconnected();
+        }
+      };
+    };
+
+    function handleToolCall(fc) {
+      log("Tool call received: " + fc.name);
+      if (window.AndroidBridge) {
+        let result = "{}";
+        if (fc.name === "openWhatsApp") {
+          result = window.AndroidBridge.openWhatsApp();
+        } else if (fc.name === "openApp") {
+          result = window.AndroidBridge.openApp(fc.args?.appName || "");
+        } else if (fc.name === "openWebsite") {
+          result = window.AndroidBridge.openWebsite(fc.args?.url || "");
+        } else if (fc.name === "makeCall") {
+          result = window.AndroidBridge.makeCall(fc.args?.phoneNumber || "");
+        } else if (fc.name === "callContact") {
+          result = window.AndroidBridge.callContact(fc.args?.contactName || "");
+        }
+
+        const respObj = {
+          toolResponse: {
+            functionResponses: [{
+              id: fc.id,
+              response: { output: JSON.parse(result || "{}") }
+            }]
+          }
+        };
+        if (webSocket && isConnected) {
+          webSocket.send(JSON.stringify(respObj));
+        }
+      }
+    }
+  </script>
+</body>
+</html>
