@@ -8,6 +8,12 @@ data class ActionDefinition(
     val parameterSchema: Map<String, String>
 )
 
+sealed class ExecutionResult {
+    object Allowed : ExecutionResult()
+    data class Denied(val reason: String) : ExecutionResult()
+    data class Restricted(val reason: String) : ExecutionResult()
+}
+
 object ActionRegistry {
     private const val TAG = "ActionRegistry"
     private val registry = mutableMapOf<String, ActionDefinition>()
@@ -51,6 +57,25 @@ object ActionRegistry {
 
     fun getAction(name: String): ActionDefinition? {
         return registry[name]
+    }
+
+    fun canExecuteAction(actionName: String, arguments: Map<String, Any?>): ExecutionResult {
+        // 1. Gating Step: Check if the action is registered
+        val definition = getAction(actionName)
+        if (definition == null) {
+            Log.e(TAG, "Blocked unregistered/unknown action: ''")
+            return ExecutionResult.Restricted("Action '' is unknown/unregistered.")
+        }
+
+        // 2. Gating Step: Pass through ActionSecurityPolicy check
+        val securityPolicy = ActionSecurityPolicy()
+        val securityCheck = securityPolicy.checkAction(actionName, arguments)
+        if (securityCheck.level == SecurityLevel.RESTRICTED) {
+            Log.e(TAG, "Blocked restricted action: '' by security policy!")
+            return ExecutionResult.Denied("Blocked restricted action: ''")
+        }
+
+        return ExecutionResult.Allowed
     }
 
     fun getAllActions(): List<ActionDefinition> {

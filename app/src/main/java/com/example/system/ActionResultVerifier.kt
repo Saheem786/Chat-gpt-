@@ -3,37 +3,61 @@ package com.example.system
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
 
-class ActionResultVerifier {
+sealed class VerificationResult {
+    object Success : VerificationResult()
+    data class Failure(val reason: String) : VerificationResult()
+    object PermissionRequired : VerificationResult()
+}
 
+class ActionResultVerifier {
     companion object {
         private const val TAG = "ActionResultVerifier"
     }
 
-    fun verifyActionSucceeded(actionName: String, expectedTarget: String?): Boolean {
-        Log.i(TAG, "Verifying action '$actionName' success for target: $expectedTarget")
+    fun verifyActionSucceeded(actionName: String, expectedTarget: String?): VerificationResult {
+        Log.i(TAG, "Verifying action '' success for target: ")
         
         val service = SamScreenContextService.getInstance()
         if (service == null) {
-            Log.e(TAG, "Accessibility Service is not active. Verification skipped.")
-            return true // Assume success fallback
+            Log.e(TAG, "Accessibility Service is not active. Permission required!")
+            return VerificationResult.PermissionRequired
         }
-
-        val rootNode = service.rootInActiveWindow ?: return false
+        val rootNode = service.rootInActiveWindow
+        if (rootNode == null) {
+            Log.e(TAG, "Root window node is null! Accessibility context inaccessible.")
+            return VerificationResult.PermissionRequired
+        }
         
         return when (actionName.lowercase()) {
             "click" -> {
-                if (expectedTarget != null) {
+                if (expectedTarget != null && expectedTarget.isNotBlank()) {
                     val nodes = findNodesByText(rootNode, expectedTarget)
-                    nodes.isNotEmpty()
+                    if (nodes.isNotEmpty()) {
+                        VerificationResult.Success
+                    } else {
+                        VerificationResult.Failure("Target text '' was not found on screen after click.")
+                    }
                 } else {
-                    true
+                    VerificationResult.Success
                 }
             }
             "input_text" -> {
-                true // Handled by checking typing outcomes
+                if (expectedTarget != null && expectedTarget.isNotBlank()) {
+                    val nodes = findNodesByText(rootNode, expectedTarget)
+                    if (nodes.isNotEmpty()) {
+                        VerificationResult.Success
+                    } else {
+                        VerificationResult.Failure("Typed text '' was not found in any text elements on screen.")
+                    }
+                } else {
+                    VerificationResult.Failure("No target text provided to verify typing outcome.")
+                }
+            }
+            "scroll" -> {
+                VerificationResult.Success
             }
             else -> {
-                true
+                VerificationResult.Failure("Unknown action execution: ")
             }
         }
     }

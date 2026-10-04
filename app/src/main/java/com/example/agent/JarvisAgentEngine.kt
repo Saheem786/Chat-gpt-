@@ -44,13 +44,33 @@ class JarvisAgentEngine(private val context: Context) {
                 sb.toString()
             } ?: ""
 
-            onUpdate("Analyzing and planning next steps...")
+            // 1. PLAN Phase
+            onUpdate("PLAN Phase: Analyzing screen layout and parsing goal...")
             val action = commandParser.parseCommand(userGoal, screenLayoutText)
             Log.d(TAG, "Planned action step: $action")
-            delay(500)
+            onUpdate("PLAN: Formulated step [${action.actionName}] targeting elements matching [${action.arguments["text"] ?: action.arguments["direction"] ?: ""}]")
+            delay(600)
 
-            onUpdate("Executing screen operation: ${action.actionName}...")
-            
+            // 2. ACT Phase (ActionRegistry is our gatekeeper)
+            onUpdate("ACT Phase: Passing action through ActionRegistry execution gate...")
+            val executionCheck = com.example.device.command.ActionRegistry.canExecuteAction(action.actionName, action.arguments)
+            when (executionCheck) {
+                is com.example.device.command.ExecutionResult.Denied -> {
+                    onUpdate("ACT blocked: Security Policy DENIED execution of action '${action.actionName}'!")
+                    Log.e(TAG, "ACT blocked by security policy.")
+                    return@withContext false
+                }
+                is com.example.device.command.ExecutionResult.Restricted -> {
+                    onUpdate("ACT blocked: RESTRICTED/UNKNOWN action: ${(executionCheck as com.example.device.command.ExecutionResult.Restricted).reason}")
+                    Log.e(TAG, "ACT blocked: Restricted/Unknown action.")
+                    return@withContext false
+                }
+                com.example.device.command.ExecutionResult.Allowed -> {
+                    onUpdate("ACT Phase: Action verified and allowed by Security Policy.")
+                }
+            }
+
+            onUpdate("ACT Phase: Executing screen operation: ${action.actionName}...")
             val executed = if (action.actionName.lowercase() == "navigate") {
                 val dest = action.arguments["destination"]?.toString() ?: "HOME"
                 if (dest == "BACK") {
@@ -64,29 +84,39 @@ class JarvisAgentEngine(private val context: Context) {
 
             if (executed) {
                 delay(800) // Allow screen transition/update layout
-                onUpdate("Verifying screen action results...")
                 
+                // 3. VERIFY Phase
+                onUpdate("VERIFY Phase: Inspecting actual screen state changes...")
                 val expectedTarget = action.arguments["text"]?.toString() ?: action.arguments["direction"]?.toString()
-                val verified = resultVerifier.verifyActionSucceeded(action.actionName, expectedTarget)
+                val verification = resultVerifier.verifyActionSucceeded(action.actionName, expectedTarget)
                 
-                if (verified) {
-                    success = true
-                    onUpdate("Screen action executed and verified successfully!")
-                    Log.i(TAG, "Screen action step succeeded and verified.")
-                } else {
-                    retryCount++
-                    onUpdate("Verification failed. Retrying screen analysis (Attempt $retryCount/3)...")
-                    Log.w(TAG, "Action verification failed. Retrying loop step.")
-                    delay(800)
+                // 4. REFLECT Phase
+                onUpdate("REFLECT Phase: Evaluating action execution outcome...")
+                when (verification) {
+                    is com.example.system.VerificationResult.Success -> {
+                        success = true
+                        onUpdate("REFLECT: Action verified successfully! Goal achieved.")
+                        Log.i(TAG, "Screen action step succeeded and verified.")
+                    }
+                    is com.example.system.VerificationResult.PermissionRequired -> {
+                        onUpdate("REFLECT: Verification failed: Accessibility service died or permissions required.")
+                        Log.e(TAG, "Accessibility service context missing during verification.")
+                        return@withContext false
+                    }
+                    is com.example.system.VerificationResult.Failure -> {
+                        retryCount++
+                        onUpdate("REFLECT: Action verification failed (Attempt $retryCount/3): ${(verification as com.example.system.VerificationResult.Failure).reason}")
+                        Log.w(TAG, "Action verification failed. Retrying.")
+                        delay(800)
+                    }
                 }
             } else {
                 retryCount++
-                onUpdate("Execution failed. Retrying (Attempt $retryCount/3)...")
-                Log.e(TAG, "Action execution failed. Retrying loop.")
+                onUpdate("REFLECT: Action execution failed. Retrying (Attempt $retryCount/3)...")
+                Log.e(TAG, "Action execution failed.")
                 delay(800)
             }
         }
-
         return@withContext success
     }
 

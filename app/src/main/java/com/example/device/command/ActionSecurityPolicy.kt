@@ -16,6 +16,23 @@ class ActionSecurityPolicy {
 
     fun checkAction(action: String, args: Map<String, Any?>): SecurityCheckResult {
         val normalizedAction = action.lowercase().trim()
+        
+        // Block restricted keywords for security policy safety
+        val RESTRICTED_KEYWORDS = listOf(
+            "factory_reset", "format", "wipe", "delete_all", "shutdown", "reboot",
+            "install_unknown", "uninstall_system", "root", "exploit", "malware"
+        )
+        val allText = (normalizedAction + " " + args.values.joinToString(" ")).lowercase()
+        for (keyword in RESTRICTED_KEYWORDS) {
+            if (allText.contains(keyword)) {
+                return SecurityCheckResult(
+                    level = SecurityLevel.RESTRICTED,
+                    requiresConfirmation = false,
+                    promptMessage = "Security policy blocked action containing restricted keyword: ''"
+                )
+            }
+        }
+
         return when (normalizedAction) {
             "send_sms", "sendsms", "sms" -> {
                 val message = args["message"]?.toString() ?: ""
