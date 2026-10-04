@@ -44,6 +44,13 @@ import android.content.IntentFilter
 import android.os.Build
 import android.util.Log
 
+/**
+ * SamViewModel - Production Voice Architecture:
+ * - Controlled Single Entry Gate: startCommandListeningIfAllowed()
+ * - TTS Session Lifecycle: waits for full multi-chunk Gemini stream completion
+ * - Protected Busy States: PROCESSING, GEMINI_STREAMING, TOOL_EXECUTION, SPEAKING, FINAL_RESULT
+ * - Barge-in disabled by default to prevent racing with audio playback
+ */
 enum class AssistantState {
     IDLE,
     CONNECTING,
@@ -132,6 +139,7 @@ enum class VoiceState {
     COMMAND_LISTENING,
     FINAL_RESULT,
     PROCESSING,
+    GEMINI_STREAMING,
     TOOL_EXECUTION,
     SPEAKING,
     ERROR_RECOVERY
@@ -179,12 +187,29 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
     fun isMicrophoneBusy(): Boolean {
         val st = _uiState.value.state
         return currentVoiceState == VoiceState.PROCESSING ||
+               currentVoiceState == VoiceState.GEMINI_STREAMING ||
                currentVoiceState == VoiceState.TOOL_EXECUTION ||
                currentVoiceState == VoiceState.SPEAKING ||
                currentVoiceState == VoiceState.FINAL_RESULT ||
                st == AssistantState.THINKING ||
                st == AssistantState.SPEAKING ||
                _uiState.value.isSendingChat
+    }
+
+    fun startCommandListeningIfAllowed(): Boolean {
+        if (isMicrophoneBusy()) {
+            addLog("startCommandListeningIfAllowed BLOCKED: microphone busy (currentVoiceState=$currentVoiceState, assistantState=${_uiState.value.state})")
+            return false
+        }
+        if (currentVoiceState != VoiceState.IDLE && currentVoiceState != VoiceState.COMMAND_LISTENING) {
+            addLog("startCommandListeningIfAllowed BLOCKED: state is $currentVoiceState")
+            return false
+        }
+        stopWakeWordService()
+        currentVoiceState = VoiceState.COMMAND_LISTENING
+        addLog("VOICE_STATE: COMMAND_LISTENING [RECOGNIZER_START]")
+        voiceInputHandler?.startListening()
+        return true
     }
 
     private val _uiState = MutableStateFlow(SamUiState())
@@ -484,9 +509,7 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
                     viewModelScope.launch {
                         delay(350)
                         if (_uiState.value.state == AssistantState.LISTENING && _uiState.value.isMicActive && !isMicrophoneBusy()) {
-                            currentVoiceState = VoiceState.COMMAND_LISTENING
-                            addLog("VOICE_STATE: COMMAND_LISTENING [RECOGNIZER_START]")
-                            voiceInputHandler?.startListening()
+                            startCommandListeningIfAllowed()
                         }
                     }
                 } else if (!isTimeout) {
@@ -525,9 +548,7 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
                             actionBanner = "JARVIS is listening..."
                         )
                     }
-                    currentVoiceState = VoiceState.COMMAND_LISTENING
-                    addLog("VOICE_STATE: COMMAND_LISTENING [RECOGNIZER_START]")
-                    voiceInputHandler?.startListening()
+                    startCommandListeningIfAllowed()
                 } else {
                     val nextState = if (_uiState.value.isMicActive) AssistantState.LISTENING else AssistantState.IDLE
                     _uiState.update { it.copy(state = nextState, amplitude = 0f) }
@@ -559,7 +580,10 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
                 startBargeInMonitor()
             },
             onSpeechEnded = {
-                addLog("TTS speech ended")
+                addLog("TTS individual utterance finished")
+            },
+            onSpeechSessionEnded = {
+                addLog("TTS SESSION COMPLETE: Assistant response finished speaking")
                 stopBargeInMonitor()
                 
                 addLog("VOICE_STATE: IDLE [TTS_DONE]")
@@ -577,12 +601,9 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
                             actionBanner = "JARVIS is listening..."
                         )
                     }
-                    currentVoiceState = VoiceState.COMMAND_LISTENING
-                    addLog("VOICE_STATE: COMMAND_LISTENING [RECOGNIZER_START]")
-                    voiceInputHandler?.startListening()
+                    startCommandListeningIfAllowed()
                 } else {
-                    val nextState = if (_uiState.value.isMicActive) AssistantState.LISTENING else AssistantState.IDLE
-                    _uiState.update { it.copy(state = nextState, amplitude = 0f) }
+                    _uiState.update { it.copy(state = AssistantState.IDLE, amplitude = 0f) }
                     if (isWakeWordOn) {
                         startWakeWordService()
                     }
@@ -1397,12 +1418,10 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
         }
         // Stop competing microphone owner (wake word service)
         stopWakeWordService()
-        currentVoiceState = VoiceState.COMMAND_LISTENING
-        addLog("VOICE_STATE: COMMAND_LISTENING [RECOGNIZER_START]")
 
         viewModelScope.launch(Dispatchers.Main) {
             try {
-                voiceInputHandler?.startListening()
+                startCommandListeningIfAllowed()
             } catch (e: Exception) {
                 Log.e("SamVoice", "Failed to start speech recognizer", e)
                 _uiState.update { it.copy(errorMessage = "Voice error: ${e.localizedMessage ?: e.message}") }
@@ -1443,7 +1462,7 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
         val trimmed = text.trim()
         if (trimmed.isBlank()) {
             if (_uiState.value.currentMode == AppMode.VOICE && _uiState.value.isMicActive) {
-                voiceInputHandler?.startListening()
+                startCommandListeningIfAllowed()
             }
             return
         }
@@ -2820,6 +2839,10 @@ $tempo beats per minute, fading out...
                     var streamedChunksCount = 0
                     val onChunkAvailable: (String, Boolean) -> Unit = { chunk, isFirst ->
                         streamedChunksCount++
+                        if (isFirst) {
+                            currentVoiceState = VoiceState.GEMINI_STREAMING
+                            addLog("VOICE_STATE: GEMINI_STREAMING")
+                        }
                         if (_uiState.value.currentMode == AppMode.VOICE) {
                             if (isFirst) {
                                 _uiState.update {
@@ -2849,6 +2872,10 @@ $tempo beats per minute, fading out...
                     } ?: Pair("Maaf kijiye, server connect nahi ho paya. Ek baar phir bole.", null)
                     replyText = result.first
                     responseAudio = result.second
+
+                    if (streamedChunksCount > 0) {
+                        ttsEngine?.markStreamingResponseComplete()
+                    }
 
                     if (replyText.isNotBlank()) {
                         val assistantMsg = ChatMessage(
@@ -3015,9 +3042,11 @@ $tempo beats per minute, fading out...
     }
 
     private var bargeInJob: kotlinx.coroutines.Job? = null
+    private var isBargeInEnabled = false // Explicitly disabled unless intentionally activated
     private var isBargeInActive = false
 
     private fun startBargeInMonitor() {
+        if (!isBargeInEnabled) return
         if (isBargeInActive) return
         isBargeInActive = true
 
@@ -3068,8 +3097,9 @@ $tempo beats per minute, fading out...
                                                 actionBanner = "Haan yaar, bolo! Listening..."
                                             )
                                         }
-                                        voiceInputHandler?.startListening()
                                         stopBargeInMonitor()
+                                        currentVoiceState = VoiceState.IDLE
+                                        startCommandListeningIfAllowed()
                                     }
                                     break
                                 }

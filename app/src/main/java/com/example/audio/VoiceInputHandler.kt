@@ -62,7 +62,7 @@ class VoiceInputHandler(
                 }
                 isListening = false
                 mainHandler.postDelayed({
-                    if (!isDestroyed) {
+                    if (!isDestroyed && checkCanListen()) {
                         startListening()
                     }
                 }, 200L)
@@ -203,11 +203,17 @@ class VoiceInputHandler(
 
             // Auto-recovery for Error 11 (ERROR_SERVER_DISCONNECTED) and Error 8 (ERROR_RECOGNIZER_BUSY)
             if ((errorCode == SpeechRecognizer.ERROR_SERVER_DISCONNECTED || errorCode == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) && retryCount < 3 && !isDestroyed) {
+                if (!checkCanListen()) {
+                    onDiagnosticLog("SpeechRecognizer auto-retry BLOCKED: microphone/assistant busy")
+                    return
+                }
                 retryCount++
                 onDiagnosticLog("Speech service disconnected/busy (code $errorCode). Auto-reconnecting attempt $retryCount/3...")
                 mainHandler.postDelayed({
-                    if (!isDestroyed) {
+                    if (!isDestroyed && checkCanListen()) {
                         startListening()
+                    } else {
+                        onDiagnosticLog("Delayed retry cancelled: destroyed or busy")
                     }
                 }, 350L * retryCount)
                 return
@@ -215,12 +221,20 @@ class VoiceInputHandler(
 
             // Gently handle ERROR_NO_MATCH without alarming error messages
             if (errorCode == SpeechRecognizer.ERROR_NO_MATCH) {
+                if (!checkCanListen()) {
+                    onDiagnosticLog("SpeechRecognizer ERROR_NO_MATCH suppressed: assistant busy")
+                    return
+                }
                 onDiagnosticLog("SpeechRecognizer: No match detected. Soft reset.")
                 onErrorOccurred("Listening...", true)
                 return
             }
 
             val isTimeout = errorCode == SpeechRecognizer.ERROR_SPEECH_TIMEOUT
+            if (isTimeout && !checkCanListen()) {
+                onDiagnosticLog("SpeechRecognizer ERROR_SPEECH_TIMEOUT suppressed: assistant busy")
+                return
+            }
 
             val errorMsg = when (errorCode) {
                 SpeechRecognizer.ERROR_AUDIO -> "Audio recording error"
@@ -291,8 +305,16 @@ class VoiceInputHandler(
 
     fun startListening() {
         if (isDestroyed) return
-
+        if (!checkCanListen()) {
+            onDiagnosticLog("SpeechRecognizer start BLOCKED: microphone/assistant busy")
+            return
+        }
         runOnMain {
+            if (isDestroyed || !checkCanListen()) {
+                onDiagnosticLog("SpeechRecognizer start BLOCKED: microphone/assistant busy")
+                return@runOnMain
+            }
+
             if (!hasRecordAudioPermission()) {
                 val err = "Microphone permission is required for voice recognition."
                 onDiagnosticLog("Start listening aborted: $err")
