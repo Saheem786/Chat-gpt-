@@ -19,7 +19,7 @@ class JarvisScreenCommandParser {
 
         return when {
             lowerInput.contains("click") || lowerInput.contains("tap") -> {
-                val targetText = extractTargetText(userInput, listOf("click", "click on", "tap", "tap on"))
+                val targetText = extractTargetText(userInput, listOf("click on", "click", "tap on", "tap"))
                 ParsedScreenAction(
                     actionName = "click",
                     arguments = mapOf("text" to targetText)

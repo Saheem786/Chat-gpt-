@@ -127,7 +127,26 @@ class SamWakeWordService : Service() {
         if (!hasPermission) {
             Log.e(TAG, "Cannot start SamWakeWordService. RECORD_AUDIO permission missing.")
             // Safety: Always call startForeground first to prevent ForegroundServiceDidNotStartInTimeException, then stopSelf.
-            startForeground(NOTIFICATION_ID, createNotification())
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    // Try starting with MICROPHONE type first so it complies with manifest
+                    startForeground(
+                        NOTIFICATION_ID, 
+                        createNotification(), 
+                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                    )
+                } else {
+                    startForeground(NOTIFICATION_ID, createNotification())
+                }
+            } catch (e: SecurityException) {
+                Log.e(TAG, "SecurityException on fallback startForeground when permission is missing", e)
+                try {
+                    // Try fallback startForeground without type
+                    startForeground(NOTIFICATION_ID, createNotification())
+                } catch (ex: SecurityException) {
+                    Log.e(TAG, "SecurityException on absolute fallback startForeground", ex)
+                }
+            }
             stopSelf()
             return START_NOT_STICKY
         }

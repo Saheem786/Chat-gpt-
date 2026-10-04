@@ -291,7 +291,12 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
         addLog("Room Database initialized: chat history loaded")
 
         // Start Wake Word Background Service if enabled
-        if (isWakeWordOn) {
+        val hasMicPermission = ContextCompat.checkSelfPermission(
+            application.applicationContext,
+            android.Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (isWakeWordOn && hasMicPermission) {
             val context = application.applicationContext
             val serviceIntent = Intent(context, com.example.audio.SamWakeWordService::class.java)
             try {
@@ -304,6 +309,8 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: Exception) {
                 Log.e("SamViewModel", "Failed to start wake word service on init", e)
             }
+        } else if (isWakeWordOn) {
+            addLog("Skipped starting Wake Word on init because RECORD_AUDIO permission is missing.")
         }
 
         // Deliver Morning Briefing if pending
@@ -1919,14 +1926,26 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
 
         val activePhrase = _uiState.value.wakeWordOption.phrase
         val serviceIntent = Intent(context, com.example.audio.SamWakeWordService::class.java)
+
+        val hasMicPermission = ContextCompat.checkSelfPermission(
+            context,
+            android.Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+
         try {
             if (enabled) {
+                if (!hasMicPermission) {
+                    addLog("Cannot start wake word: RECORD_AUDIO permission is missing.")
+                    _uiState.update { it.copy(wakeWordEnabled = false, errorMessage = "Microphone permission is required to enable Wake Word detection.") }
+                    prefs.edit().putBoolean("wake_word_enabled", false).apply()
+                    return
+                }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     context.startForegroundService(serviceIntent)
                 } else {
                     context.startService(serviceIntent)
                 }
-                addLog("Always-on '$activePhrase' wake word listener service started.")
+                addLog("Always-on '' wake word listener service started.")
             } else {
                 context.stopService(serviceIntent)
                 addLog("Always-on wake word listener service stopped.")
