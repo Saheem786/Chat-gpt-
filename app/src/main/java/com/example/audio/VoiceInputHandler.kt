@@ -24,6 +24,7 @@ import androidx.core.content.ContextCompat
  */
 class VoiceInputHandler(
     private val context: Context,
+    private val checkCanListen: () -> Boolean = { true },
     private val onSpeechReady: () -> Unit = {},
     private val onSpeechStarted: () -> Unit = {},
     private val onRmsAmplitudeChanged: (amplitude: Float) -> Unit = {},

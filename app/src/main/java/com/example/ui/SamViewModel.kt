@@ -125,7 +125,67 @@ data class SamUiState(
     val ttsVoiceStyle: String = "FEMALE"
 )
 
+enum class VoiceState {
+    IDLE,
+    WAKE_WORD_LISTENING,
+    WAKE_WORD_DETECTED,
+    COMMAND_LISTENING,
+    FINAL_RESULT,
+    PROCESSING,
+    TOOL_EXECUTION,
+    SPEAKING,
+    ERROR_RECOVERY
+}
+
 class SamViewModel(application: Application) : AndroidViewModel(application) {
+    private var currentVoiceState = VoiceState.IDLE
+
+    fun startWakeWordService() {
+        val context = getApplication<Application>().applicationContext
+        val prefs = context.getSharedPreferences("sam_prefs", Context.MODE_PRIVATE)
+        val isWakeWordOn = prefs.getBoolean("wake_word_enabled", false)
+        val hasMicPermission = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (isWakeWordOn && hasMicPermission) {
+            val serviceIntent = Intent(context, com.example.audio.SamWakeWordService::class.java)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(serviceIntent)
+                } else {
+                    context.startService(serviceIntent)
+                }
+                currentVoiceState = VoiceState.WAKE_WORD_LISTENING
+                addLog("VOICE_STATE: WAKE_WORD_LISTENING [WAKE_START]")
+            } catch (e: Exception) {
+                Log.e("SamViewModel", "Failed to start wake word service", e)
+            }
+        }
+    }
+
+    fun stopWakeWordService() {
+        val context = getApplication<Application>().applicationContext
+        val serviceIntent = Intent(context, com.example.audio.SamWakeWordService::class.java)
+        try {
+            context.stopService(serviceIntent)
+            addLog("VOICE_STATE: WAKE_STOP")
+        } catch (e: Exception) {
+            Log.e("SamViewModel", "Failed to stop wake word service", e)
+        }
+    }
+
+    fun isMicrophoneBusy(): Boolean {
+        val st = _uiState.value.state
+        return currentVoiceState == VoiceState.PROCESSING ||
+               currentVoiceState == VoiceState.TOOL_EXECUTION ||
+               currentVoiceState == VoiceState.SPEAKING ||
+               currentVoiceState == VoiceState.FINAL_RESULT ||
+               st == AssistantState.THINKING ||
+               st == AssistantState.SPEAKING ||
+               _uiState.value.isSendingChat
+    }
 
     private val _uiState = MutableStateFlow(SamUiState())
     val uiState: StateFlow<SamUiState> = _uiState.asStateFlow()
@@ -369,7 +429,10 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
     private fun initAudioSystem() {
         voiceInputHandler = VoiceInputHandler(
             context = getApplication(),
+            checkCanListen = { !isMicrophoneBusy() },
             onSpeechReady = {
+                currentVoiceState = VoiceState.COMMAND_LISTENING
+                addLog("VOICE_STATE: COMMAND_LISTENING [RECOGNIZER_START]")
                 _uiState.update {
                     it.copy(
                         state = AssistantState.LISTENING,
@@ -381,6 +444,7 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
                 addLog("Speech recognizer ready. Listening...")
             },
             onSpeechStarted = {
+                currentVoiceState = VoiceState.COMMAND_LISTENING
                 _uiState.update { it.copy(actionBanner = "Hearing your voice...") }
                 addLog("User speaking detected")
             },
@@ -392,12 +456,14 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
             onPartialTranscript = { partialText ->
                 _uiState.update {
                     it.copy(
-                        transcript = "You: $partialText",
-                        actionBanner = "Hearing: $partialText"
+                        transcript = "You: ",
+                        actionBanner = "Hearing: "
                     )
                 }
             },
             onFinalTranscript = { finalText ->
+                currentVoiceState = VoiceState.FINAL_RESULT
+                addLog("VOICE_STATE: FINAL_RESULT [RECOGNIZER_FINAL]")
                 processVoiceInput(finalText)
             },
             onSpeechEnded = {
@@ -405,17 +471,21 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update { it.copy(amplitude = 0f) }
             },
             onErrorOccurred = { errMsg, isTimeout ->
-                addLog("Voice input status: $errMsg (timeout=$isTimeout)")
-                // Suppress recognizer errors if assistant is already processing (THINKING) or speaking (SPEAKING)
-                if (_uiState.value.state == AssistantState.THINKING || _uiState.value.state == AssistantState.SPEAKING) {
-                    addLog("Suppressed recognizer event '$errMsg' during ${_uiState.value.state} state")
+                addLog("Voice input status:  (timeout=)")
+                if (isMicrophoneBusy()) {
+                    addLog("Suppressed recognizer event '' during busy microphone/assistant state")
                     return@VoiceInputHandler
                 }
+                
+                currentVoiceState = VoiceState.ERROR_RECOVERY
+                addLog("VOICE_STATE: ERROR_RECOVERY")
 
                 if (isTimeout && _uiState.value.currentMode == AppMode.VOICE && _uiState.value.isMicActive && _uiState.value.state == AssistantState.LISTENING) {
                     viewModelScope.launch {
                         delay(350)
-                        if (_uiState.value.state == AssistantState.LISTENING && _uiState.value.isMicActive) {
+                        if (_uiState.value.state == AssistantState.LISTENING && _uiState.value.isMicActive && !isMicrophoneBusy()) {
+                            currentVoiceState = VoiceState.COMMAND_LISTENING
+                            addLog("VOICE_STATE: COMMAND_LISTENING [RECOGNIZER_START]")
                             voiceInputHandler?.startListening()
                         }
                     }
@@ -433,11 +503,20 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
         audioPlayer = AudioTrackPlayer(
             onPlaybackStarted = {
                 _uiState.update { it.copy(state = AssistantState.SPEAKING) }
+                currentVoiceState = VoiceState.SPEAKING
+                addLog("VOICE_STATE: SPEAKING [TTS_START]")
                 addLog("Speaker playback started - UI state changed to SPEAKING")
                 startBargeInMonitor()
             },
             onPlaybackEnded = {
                 stopBargeInMonitor()
+                addLog("VOICE_STATE: IDLE [TTS_DONE]")
+                currentVoiceState = VoiceState.IDLE
+                
+                val context = getApplication<Application>().applicationContext
+                val prefs = context.getSharedPreferences("sam_prefs", Context.MODE_PRIVATE)
+                val isWakeWordOn = prefs.getBoolean("wake_word_enabled", false)
+
                 if (_uiState.value.currentMode == AppMode.VOICE && _uiState.value.isMicActive) {
                     _uiState.update {
                         it.copy(
@@ -446,10 +525,15 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
                             actionBanner = "JARVIS is listening..."
                         )
                     }
+                    currentVoiceState = VoiceState.COMMAND_LISTENING
+                    addLog("VOICE_STATE: COMMAND_LISTENING [RECOGNIZER_START]")
                     voiceInputHandler?.startListening()
                 } else {
                     val nextState = if (_uiState.value.isMicActive) AssistantState.LISTENING else AssistantState.IDLE
                     _uiState.update { it.copy(state = nextState, amplitude = 0f) }
+                    if (isWakeWordOn) {
+                        startWakeWordService()
+                    }
                 }
                 addLog("Speaker playback ended")
             },
@@ -470,12 +554,21 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
             scope = viewModelScope,
             onSpeechStarted = {
                 _uiState.update { it.copy(state = AssistantState.SPEAKING) }
-                addLog("TTS speech started - UI state changed to SPEAKING")
+                currentVoiceState = VoiceState.SPEAKING
+                addLog("VOICE_STATE: SPEAKING [TTS_START]")
                 startBargeInMonitor()
             },
             onSpeechEnded = {
                 addLog("TTS speech ended")
                 stopBargeInMonitor()
+                
+                addLog("VOICE_STATE: IDLE [TTS_DONE]")
+                currentVoiceState = VoiceState.IDLE
+                
+                val context = getApplication<Application>().applicationContext
+                val prefs = context.getSharedPreferences("sam_prefs", Context.MODE_PRIVATE)
+                val isWakeWordOn = prefs.getBoolean("wake_word_enabled", false)
+
                 if (_uiState.value.currentMode == AppMode.VOICE && _uiState.value.isMicActive) {
                     _uiState.update {
                         it.copy(
@@ -484,10 +577,15 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
                             actionBanner = "JARVIS is listening..."
                         )
                     }
+                    currentVoiceState = VoiceState.COMMAND_LISTENING
+                    addLog("VOICE_STATE: COMMAND_LISTENING [RECOGNIZER_START]")
                     voiceInputHandler?.startListening()
                 } else {
                     val nextState = if (_uiState.value.isMicActive) AssistantState.LISTENING else AssistantState.IDLE
                     _uiState.update { it.copy(state = nextState, amplitude = 0f) }
+                    if (isWakeWordOn) {
+                        startWakeWordService()
+                    }
                 }
             },
             onAmplitudeChanged = { amp ->
@@ -499,6 +597,7 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
                 addLog(logMsg)
             }
         )
+
         ttsEngine?.setVoiceType(_uiState.value.ttsVoiceStyle)
 
         micRecorder = MicrophoneRecorder(
@@ -531,7 +630,7 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
                 }
             },
             onError = { errMsg ->
-                addLog("Microphone error: $errMsg")
+                addLog("Microphone error: ")
                 _uiState.update { it.copy(errorMessage = errMsg, state = AssistantState.ERROR) }
             }
         )
@@ -550,7 +649,7 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
                 micRecorder?.start(viewModelScope)
             },
             onDisconnected = { reason ->
-                addLog("Gemini Live disconnected: $reason")
+                addLog("Gemini Live disconnected: ")
                 micRecorder?.stop()
                 _uiState.update {
                     it.copy(
@@ -567,27 +666,25 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
                 val prefix = if (isUser) "You: " else "JARVIS: "
                 val sender = if (isUser) MessageSender.USER else MessageSender.ASSISTANT
                 val newMsg = ChatMessage(sender = sender, text = text)
-                _uiState.update { current ->
-                    current.copy(
-                        transcript = "$prefix$text"
-                    )
-                }
                 viewModelScope.launch {
                     chatRepository.saveMessage(newMsg)
                 }
-                addLog("$prefix$text")
+                _uiState.update { current ->
+                    val updated = current.chatMessages + newMsg
+                    current.copy(chatMessages = updated, isSendingChat = false)
+                }
             },
             onToolCallReceived = { name, callId, args ->
                 handleToolCall(name, callId, args)
             },
             onInterrupted = {
-                addLog("Gemini reported interruption")
+                addLog("Gemini Live response interrupted")
                 audioPlayer?.interrupt()
                 ttsEngine?.stop()
             },
             onError = { errMsg ->
-                addLog("Gemini session error: $errMsg")
-                _uiState.update { it.copy(errorMessage = errMsg, state = AssistantState.ERROR) }
+                addLog("Gemini Live error: ")
+                _uiState.update { it.copy(errorMessage = errMsg) }
             },
             onDiagnosticLog = { logMsg ->
                 addLog(logMsg)
@@ -1298,6 +1395,11 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
         } else {
             addLog("Voice session started safely. Listening for speech (Hindi / English / Hinglish)...")
         }
+        // Stop competing microphone owner (wake word service)
+        stopWakeWordService()
+        currentVoiceState = VoiceState.COMMAND_LISTENING
+        addLog("VOICE_STATE: COMMAND_LISTENING [RECOGNIZER_START]")
+
         viewModelScope.launch(Dispatchers.Main) {
             try {
                 voiceInputHandler?.startListening()
@@ -1315,6 +1417,10 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
         audioPlayer?.interrupt()
         ttsEngine?.stop()
         geminiService?.disconnect()
+        
+        currentVoiceState = VoiceState.IDLE
+        addLog("VOICE_STATE: IDLE [RECOGNIZER_STOP]")
+        
         _uiState.update {
             it.copy(
                 state = AssistantState.IDLE,
@@ -1322,6 +1428,14 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
                 amplitude = 0f,
                 actionBanner = null
             )
+        }
+        
+        // Restart wake word if enabled
+        val context = getApplication<Application>().applicationContext
+        val prefs = context.getSharedPreferences("sam_prefs", Context.MODE_PRIVATE)
+        val isWakeWordOn = prefs.getBoolean("wake_word_enabled", false)
+        if (isWakeWordOn) {
+            startWakeWordService()
         }
     }
 
@@ -1334,7 +1448,7 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        addLog("Voice speech recognized: '$trimmed'")
+        currentVoiceState = VoiceState.PROCESSING; addLog("VOICE_STATE: PROCESSING"); addLog("Voice speech recognized: '$trimmed'")
         _uiState.update {
             it.copy(
                 state = AssistantState.THINKING,
