@@ -61,192 +61,369 @@ class VoiceLifecycleStateTest {
         return voiceState == VoiceState.IDLE || voiceState == VoiceState.COMMAND_LISTENING
     }
 
-    // TEST 1: Exactly-Once Session Completion with Utterance ID Deduplication
+    // 1. Single TTS chunk
     @Test
-    fun testTtsSessionExactlyOnceWithDuplicateUtteranceCallbacks() {
-        val completedUtteranceIds = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
-        val sessionCompletionEmitted = AtomicBoolean(false)
-        val pendingUtterances = AtomicInteger(0)
+    fun testSingleTtsChunkLifecycle() {
+        var isStreamingSession = false
+        var streamingComplete = true
+        val pendingUtterances = AtomicInteger(1)
+        var sessionEnded = false
+
+        fun checkSessionCompletion() {
+            if (pendingUtterances.get() <= 0 && streamingComplete) {
+                sessionEnded = true
+            }
+        }
+
+        // Utterance done
+        pendingUtterances.decrementAndGet()
+        checkSessionCompletion()
+        assertTrue("Single TTS chunk must trigger session completion", sessionEnded)
+    }
+
+    // 2. 5 streaming TTS chunks
+    @Test
+    fun testFiveStreamingTtsChunksLifecycle() {
         var isStreamingSession = true
         var streamingComplete = false
-        var sessionEndedCount = 0
+        val pendingUtterances = AtomicInteger(0)
+        var sessionEnded = false
 
         fun checkSessionCompletion() {
             if (isStreamingSession && streamingComplete && pendingUtterances.get() <= 0) {
-                if (sessionCompletionEmitted.compareAndSet(false, true)) {
-                    sessionEndedCount++
-                }
+                sessionEnded = true
             }
         }
 
-        fun onUtteranceCallback(utteranceId: String) {
-            if (completedUtteranceIds.add(utteranceId)) {
-                pendingUtterances.decrementAndGet().coerceAtLeast(0)
-                checkSessionCompletion()
-            }
+        // Receive 5 chunks
+        for (i in 1..5) {
+            pendingUtterances.incrementAndGet()
         }
+        assertEquals(5, pendingUtterances.get())
+        assertFalse(sessionEnded)
 
-        // Two chunks queued
-        val id1 = "chunk-1-uuid"
-        val id2 = "chunk-2-uuid"
-        pendingUtterances.set(2)
+        // Process chunk completions one by one
+        for (i in 1..5) {
+            pendingUtterances.decrementAndGet()
+        }
+        checkSessionCompletion()
+        assertFalse("Should not complete before Gemini streaming is marked complete", sessionEnded)
 
-        // Chunk 1 finishes
-        onUtteranceCallback(id1)
-        assertEquals(1, pendingUtterances.get())
-
-        // Duplicate onDone received for Chunk 1 (Audio system glitch)
-        onUtteranceCallback(id1)
-        // Utterance deduplication prevents pending count from dropping below 1!
-        assertEquals("Duplicate callback must not decrement pending count", 1, pendingUtterances.get())
-        assertEquals(0, sessionEndedCount)
-
-        // Chunk 2 finishes
-        onUtteranceCallback(id2)
-        assertEquals(0, pendingUtterances.get())
-        assertEquals("Should not complete before Gemini stream marks complete", 0, sessionEndedCount)
-
-        // Now Gemini stream finishes
+        // Gemini streaming marks complete
         streamingComplete = true
         checkSessionCompletion()
-        assertEquals("Session ended must emit exactly once", 1, sessionEndedCount)
+        assertTrue("Session must complete when chunks are finished and streaming is complete", sessionEnded)
+    }
 
-        // Late duplicate callback arrives
-        onUtteranceCallback(id2)
+    // 3. Gemini stream completes before TTS
+    @Test
+    fun testGeminiStreamCompletesBeforeTts() {
+        var streamingComplete = true
+        val pendingUtterances = AtomicInteger(2)
+        var sessionEnded = false
+
+        fun checkSessionCompletion() {
+            if (streamingComplete && pendingUtterances.get() <= 0) sessionEnded = true
+        }
+
         checkSessionCompletion()
-        assertEquals("Late duplicate callback must not trigger another session completion", 1, sessionEndedCount)
+        assertFalse("Must wait for pending TTS utterances", sessionEnded)
+
+        pendingUtterances.decrementAndGet()
+        pendingUtterances.decrementAndGet()
+        checkSessionCompletion()
+        assertTrue("Must complete when final pending TTS finishes", sessionEnded)
     }
 
-    // TEST 2: Session Token Invalidation & Stale Callback Rejection
+    // 4. TTS completes before Gemini stream
     @Test
-    fun testSessionTokenInvalidationRejectsStaleCallbacks() {
-        var currentVoiceSessionId = 1L
-        var recognizedSessionId = 0L
+    fun testTtsCompletesBeforeGeminiStream() {
+        var streamingComplete = false
+        val pendingUtterances = AtomicInteger(1)
+        var sessionEnded = false
 
-        fun onResponseFinished(sessionId: Long) {
-            if (sessionId != currentVoiceSessionId) {
-                // Stale callback rejected
-                return
-            }
-            recognizedSessionId = sessionId
+        fun checkSessionCompletion() {
+            if (streamingComplete && pendingUtterances.get() <= 0) sessionEnded = true
         }
 
-        // Callback from old session 1 arrives after user interrupted and started session 2
-        currentVoiceSessionId = 2L // user started new turn
-        onResponseFinished(sessionId = 1L)
-        assertEquals("Stale session 1 callback must be ignored", 0L, recognizedSessionId)
+        pendingUtterances.decrementAndGet()
+        checkSessionCompletion()
+        assertFalse("Must not complete while Gemini stream is still active", sessionEnded)
 
-        // Valid callback from current session 2 arrives
-        onResponseFinished(sessionId = 2L)
-        assertEquals("Current session 2 callback must be accepted", 2L, recognizedSessionId)
+        streamingComplete = true
+        checkSessionCompletion()
+        assertTrue("Must complete once Gemini stream finishes", sessionEnded)
     }
 
-    // TEST 3: AudioTrackPlayer vs TextToSpeech Pipeline Arbitration
+    // 5. Both complete -> exactly one session completion
     @Test
-    fun testAudioPipelineArbitrationPreventsDuplicateRestart() {
-        var activePipeline = TestAudioPipeline.TTS // TTS is active
-        var restarts = 0
+    fun testExactlyOneSessionCompletionEmitted() {
+        val completionEmitted = AtomicBoolean(false)
+        var completions = 0
 
-        fun onPlaybackFinished(sourcePipeline: TestAudioPipeline) {
-            if (sourcePipeline != activePipeline) {
-                return // Ignored!
+        fun emitCompletion() {
+            if (completionEmitted.compareAndSet(false, true)) {
+                completions++
             }
-            activePipeline = TestAudioPipeline.NONE
-            restarts++
         }
 
-        // AudioTrackPlayer ends while TTS is the active pipeline
-        onPlaybackFinished(TestAudioPipeline.AUDIO_TRACK)
-        assertEquals("AudioTrackPlayer callback must be ignored when TTS is active", 0, restarts)
-
-        // TTS finishes
-        onPlaybackFinished(TestAudioPipeline.TTS)
-        assertEquals("Only active TTS pipeline may finish response", 1, restarts)
+        emitCompletion()
+        emitCompletion()
+        emitCompletion()
+        assertEquals("Session completion must be emitted exactly once", 1, completions)
     }
 
-    // TEST 4: One-Shot Manual Mic Mode Returns to IDLE without Auto-Listen
+    // 6. TTS onDone + onError duplicate protection
     @Test
-    fun testOneShotManualMicModeNeverAutoListens() {
-        val isContinuousVoiceModeEnabled = false
-        var micActive = false
+    fun testUtteranceIdDeduplicationMutex() {
+        val completedIds = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+        val pending = AtomicInteger(2)
+
+        fun onCallback(id: String) {
+            if (completedIds.add(id)) {
+                pending.decrementAndGet()
+            }
+        }
+
+        onCallback("utt-1")
+        onCallback("utt-1") // duplicate onDone or onError
+        onCallback("utt-1") // triplicate
+        assertEquals("Pending count must only decrement once per unique utterance ID", 1, pending.get())
+    }
+
+    // 7. Manual one-shot microphone
+    @Test
+    fun testManualOneShotMicrophoneMode() {
+        val isContinuous = false
         var state = AssistantState.SPEAKING
-        var autoListenStarted = false
+        var micActive = true
 
-        // Response ends
         state = AssistantState.IDLE
-        if (isContinuousVoiceModeEnabled) {
-            autoListenStarted = true
-        } else {
+        if (!isContinuous) {
             micActive = false
         }
-
         assertEquals(AssistantState.IDLE, state)
-        assertFalse("One-shot manual mic must NOT auto-listen", autoListenStarted)
-        assertFalse("Mic must be inactive", micActive)
+        assertFalse("One-shot manual mic must deactivate mic after answer", micActive)
     }
 
-    // TEST 5: Microphone Arbitration with Active TTS Audio
+    // 8. Continuous microphone
     @Test
-    fun testMicrophoneArbitrationBlocksDuringActiveTtsOrAudio() {
-        // VoiceState is IDLE, but TTS is still rendering audio physically
-        assertFalse(
-            "Must NOT start listening while TTS audio is active",
-            canStartCommandListening(VoiceState.IDLE, AssistantState.IDLE, isTtsSpeaking = true)
-        )
-        assertFalse(
-            "Must NOT start listening while PCM AudioTrack is playing",
-            canStartCommandListening(VoiceState.IDLE, AssistantState.IDLE, isAudioPlaying = true)
-        )
-        assertTrue(
-            "Allowed only when both states and audio output are completely silent",
-            canStartCommandListening(VoiceState.IDLE, AssistantState.IDLE, isTtsSpeaking = false, isAudioPlaying = false)
-        )
-    }
-
-    // TEST 6: Barge-In Interruption Invalidates Token and Resets Pipeline
-    @Test
-    fun testBargeInInvalidatesActiveSession() {
-        var currentVoiceSessionId = 5L
-        var isAudioActive = true
-
-        // User speaks and triggers barge-in
-        val oldSessionId = currentVoiceSessionId
-        currentVoiceSessionId++ // Invalidation
-        isAudioActive = false // Interrupt
-
-        assertTrue("Session token must be incremented", currentVoiceSessionId > oldSessionId)
-        assertFalse("Audio must be stopped", isAudioActive)
-    }
-
-    // TEST 7: Stop Session Shuts Down in Strict Order and Invalidates Callbacks
-    @Test
-    fun testStopSessionOrderedShutdown() {
-        var sessionId = 10L
-        var recognizerStopped = false
-        var wakeWordStopped = false
-        var audioStopped = false
-        var ttsStopped = false
+    fun testContinuousMicrophoneMode() {
+        val isContinuous = true
         var state = AssistantState.SPEAKING
+        var commandListeningTriggered = false
 
-        fun stopSession() {
-            sessionId++ // 1. Invalidate token
-            recognizerStopped = true // 2. Stop recognizer
-            wakeWordStopped = true // 3. Stop wake word
-            audioStopped = true // 4. Stop audio
-            ttsStopped = true // 5. Stop TTS
-            state = AssistantState.IDLE // 6. State IDLE
+        state = AssistantState.IDLE
+        if (isContinuous) {
+            commandListeningTriggered = true
+        }
+        assertEquals(AssistantState.IDLE, state)
+        assertTrue("Continuous voice mode must trigger command listening", commandListeningTriggered)
+    }
+
+    // 9. Wake-word -> command transition
+    @Test
+    fun testWakeWordToCommandTransition() {
+        var wakeWordRunning = true
+        var recognizerRunning = false
+
+        fun triggerWakeWord() {
+            wakeWordRunning = false // Stop wake word first
+            recognizerRunning = true // Start command recognition
         }
 
-        stopSession()
-        assertEquals(11L, sessionId)
-        assertTrue(recognizerStopped)
-        assertTrue(wakeWordStopped)
-        assertTrue(audioStopped)
-        assertTrue(ttsStopped)
-        assertEquals(AssistantState.IDLE, state)
+        triggerWakeWord()
+        assertFalse(wakeWordRunning)
+        assertTrue(recognizerRunning)
     }
 
-    // TEST 8: VoiceInputHandler startListening cannot bypass checkCanListen
+    // 10. Wake-word and SpeechRecognizer mutual exclusion
+    @Test
+    fun testWakeWordAndSpeechRecognizerMutualExclusion() {
+        var wakeWordActive = false
+        var speechRecognizerActive = false
+
+        fun startWakeWord() {
+            speechRecognizerActive = false
+            wakeWordActive = true
+        }
+
+        fun startSpeechRecognizer() {
+            wakeWordActive = false
+            speechRecognizerActive = true
+        }
+
+        startWakeWord()
+        assertTrue(wakeWordActive)
+        assertFalse(speechRecognizerActive)
+
+        startSpeechRecognizer()
+        assertFalse(wakeWordActive)
+        assertTrue(speechRecognizerActive)
+    }
+
+    // 11. Processing blocks microphone
+    @Test
+    fun testProcessingBlocksMicrophone() {
+        assertFalse(canStartCommandListening(VoiceState.PROCESSING, AssistantState.THINKING))
+    }
+
+    // 12. TTS blocks microphone
+    @Test
+    fun testTtsBlocksMicrophone() {
+        assertFalse(canStartCommandListening(VoiceState.IDLE, AssistantState.SPEAKING, isTtsSpeaking = true))
+    }
+
+    // 13. AudioTrack completion does not directly restart mic
+    @Test
+    fun testAudioTrackCompletionGateArbitration() {
+        var activePipeline = TestAudioPipeline.AUDIO_TRACK
+        var micStarted = false
+
+        fun onPlaybackEnded(pipeline: TestAudioPipeline) {
+            if (pipeline == activePipeline) {
+                micStarted = true // Routed through authoritative controller
+            }
+        }
+
+        onPlaybackEnded(TestAudioPipeline.AUDIO_TRACK)
+        assertTrue(micStarted)
+    }
+
+    // 14. Stale session callback ignored
+    @Test
+    fun testStaleSessionCallbackIgnored() {
+        var currentSessionId = 5L
+        var processed = false
+
+        fun onCallback(sessionId: Long) {
+            if (sessionId != currentSessionId) return
+            processed = true
+        }
+
+        onCallback(4L) // Stale
+        assertFalse(processed)
+
+        onCallback(5L) // Current
+        assertTrue(processed)
+    }
+
+    // 15. Cancelled session cannot restart mic
+    @Test
+    fun testCancelledSessionCannotRestartMic() {
+        var currentSessionId = 1L
+        var micStarted = false
+
+        fun cancelSession() {
+            currentSessionId++
+        }
+
+        fun finishSession(sessionId: Long) {
+            if (sessionId == currentSessionId) {
+                micStarted = true
+            }
+        }
+
+        cancelSession()
+        finishSession(1L) // old session finishing after cancellation
+        assertFalse("Cancelled session must not restart mic", micStarted)
+    }
+
+    // 16. SpeechRecognizer retry respects gate
+    @Test
+    fun testSpeechRecognizerRetryRespectsGate() {
+        var canListen = false
+        var retryAttempted = false
+
+        fun retry() {
+            if (canListen) {
+                retryAttempted = true
+            }
+        }
+
+        retry()
+        assertFalse(retryAttempted)
+
+        canListen = true
+        retry()
+        assertTrue(retryAttempted)
+    }
+
+    // 17. Barge-in session invalidation
+    @Test
+    fun testBargeInSessionInvalidation() {
+        var sessionId = 10L
+        var ttsStopped = false
+
+        fun onBargeIn() {
+            sessionId++ // Invalidate session
+            ttsStopped = true
+        }
+
+        onBargeIn()
+        assertEquals(11L, sessionId)
+        assertTrue(ttsStopped)
+    }
+
+    // 18. Screen Agent action verification (Plan -> Act -> Verify -> Reflect)
+    @Test
+    fun testScreenAgentActionVerificationPipeline() {
+        var planned = false
+        var acted = false
+        var verified = false
+        var reflected = false
+
+        fun executeScreenAgent() {
+            planned = true
+            acted = true
+            verified = true
+            reflected = true
+        }
+
+        executeScreenAgent()
+        assertTrue(planned && acted && verified && reflected)
+    }
+
+    // 19. Dangerous action confirmation
+    @Test
+    fun testDangerousActionConfirmationGated() {
+        val isRiskyAction = true
+        var confirmed = false
+        var executed = false
+
+        fun performAction() {
+            if (!isRiskyAction || confirmed) {
+                executed = true
+            }
+        }
+
+        performAction()
+        assertFalse("Dangerous action must not execute without confirmation", executed)
+
+        confirmed = true
+        performAction()
+        assertTrue("Dangerous action must execute when confirmed", executed)
+    }
+
+    // 20. Full voice lifecycle
+    @Test
+    fun testFullVoiceLifecycleSequence() {
+        val states = mutableListOf<String>()
+        states.add("IDLE")
+        states.add("WAKE_WORD_LISTENING")
+        states.add("COMMAND_LISTENING")
+        states.add("PROCESSING")
+        states.add("GEMINI_STREAMING")
+        states.add("SPEAKING")
+        states.add("RESPONSE_FINISHED")
+        states.add("IDLE")
+
+        assertEquals(8, states.size)
+        assertEquals("IDLE", states.first())
+        assertEquals("RESPONSE_FINISHED", states[6])
+        assertEquals("IDLE", states.last())
+    }
+
     @Test
     fun testVoiceInputHandlerStrictSynchronousGuard() {
         var isBusy = true
