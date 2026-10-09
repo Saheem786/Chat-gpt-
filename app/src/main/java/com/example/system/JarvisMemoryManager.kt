@@ -2,17 +2,27 @@ package com.example.system
 
 import android.content.Context
 import android.util.Log
+import com.example.data.MemoryDao
+import com.example.data.MemoryEntity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
-class JarvisMemoryManager(context: Context) {
+class JarvisMemoryManager(context: Context, private val memoryDao: MemoryDao) {
     private val prefs = context.getSharedPreferences("jarvis_cognitive_memory", Context.MODE_PRIVATE)
 
     init {
         Log.d("JarvisMemoryManager", "Memory system initialized.")
     }
 
-    /**
-     * Store a memory fact or preference
-     */
+    // Structured storage
+    fun storeStructuredMemory(entity: MemoryEntity, scope: CoroutineScope) {
+        scope.launch(Dispatchers.IO) {
+            memoryDao.insertMemory(entity)
+        }
+    }
+
+    // Backward compatibility with SharedPreferences (keep as is or migrate)
     fun storeMemory(key: String, value: String) {
         Log.d("JarvisMemoryManager", "Storing memory link: $key -> $value")
         prefs.edit().putString(key.lowercase().trim(), value).apply()

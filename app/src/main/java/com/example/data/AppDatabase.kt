@@ -5,9 +5,10 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 
-@Database(entities = [ChatMessageEntity::class], version = 5, exportSchema = false)
+@Database(entities = [ChatMessageEntity::class, MemoryEntity::class], version = 6, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun chatMessageDao(): ChatMessageDao
+    abstract fun memoryDao(): MemoryDao
 
     companion object {
         @Volatile

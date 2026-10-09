@@ -21,6 +21,7 @@ import com.example.audio.TextToSpeechEngine
 import com.example.audio.VoiceInputHandler
 import com.example.data.AppDatabase
 import com.example.data.ChatRepository
+import com.example.data.MemoryEntity
 import com.example.device.ContactItem
 import com.example.device.DeviceActionManager
 import com.example.device.DeviceActionResult
@@ -271,6 +272,7 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
 
     private val chatDatabase = AppDatabase.getInstance(application)
     private val chatRepository = ChatRepository(chatDatabase.chatMessageDao())
+    private val memoryManager = com.example.system.JarvisMemoryManager(application.applicationContext, chatDatabase.memoryDao())
 
     private var audioPlayer: AudioTrackPlayer? = null
     private var ttsEngine: TextToSpeechEngine? = null
@@ -2864,10 +2866,22 @@ $tempo beats per minute, fading out...
                     }
 
                     val timeoutMs = if (activeEngineMode == AiEngineMode.DEEP_THINK || isDeepResearch) 35000L else 12000L
+                    
+                    // Retrieve context-aware memories
+                    val relevantMemories = withContext(Dispatchers.IO) {
+                        chatDatabase.memoryDao().searchMemories(text.take(50)) 
+                    }
+                    val memoryContext = relevantMemories.joinToString("\n") { it.summary }
+                    val enhancedPrompt = if (memoryContext.isNotBlank()) {
+                        "Contextual Memories:\n$memoryContext\n\nUser Prompt: $text"
+                    } else {
+                        text
+                    }
+
                     val result = withTimeoutOrNull(timeoutMs) {
                         withContext(Dispatchers.IO) {
                             geminiService?.generateChatResponse(
-                                prompt = text,
+                                prompt = enhancedPrompt,
                                 base64Image = attachedImg,
                                 isDeepResearch = isDeepResearch,
                                 preferredModel = _uiState.value.selectedModel,
@@ -2883,12 +2897,18 @@ $tempo beats per minute, fading out...
                         ttsEngine?.markStreamingResponseComplete()
                     }
 
+                    // ... (previous lines)
+                    
                     if (replyText.isNotBlank()) {
                         val assistantMsg = ChatMessage(
                             sender = MessageSender.ASSISTANT,
                             text = replyText
                         )
                         chatRepository.saveMessage(assistantMsg)
+                        
+                        // Extract memories in background
+                        extractAndStoreMemories(text, replyText)
+                        
                         _uiState.update {
                             it.copy(
                                 isSendingChat = false,
@@ -2897,6 +2917,22 @@ $tempo beats per minute, fading out...
                                 state = if (_uiState.value.currentMode == AppMode.VOICE) AssistantState.SPEAKING else AssistantState.IDLE
                             )
                         }
+
+    // New extraction method
+    private fun extractAndStoreMemories(userPrompt: String, assistantResponse: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            // Very simple extraction logic for demonstration
+            if (userPrompt.contains("remember", ignoreCase = true) || userPrompt.contains("prefer", ignoreCase = true)) {
+                val entity = MemoryEntity(
+                    category = "PREFERENCE",
+                    summary = "User stated: $userPrompt - Assistant response: $assistantResponse",
+                    importanceScore = 5,
+                    isConfirmed = true
+                )
+                memoryManager.storeStructuredMemory(entity, viewModelScope)
+            }
+        }
+    }
 
                         if (_uiState.value.currentMode == AppMode.VOICE) {
                             if (!responseAudio.isNullOrEmpty()) {
