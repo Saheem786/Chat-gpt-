@@ -2918,22 +2918,6 @@ $tempo beats per minute, fading out...
                             )
                         }
 
-    // New extraction method
-    private fun extractAndStoreMemories(userPrompt: String, assistantResponse: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            // Very simple extraction logic for demonstration
-            if (userPrompt.contains("remember", ignoreCase = true) || userPrompt.contains("prefer", ignoreCase = true)) {
-                val entity = MemoryEntity(
-                    category = "PREFERENCE",
-                    summary = "User stated: $userPrompt - Assistant response: $assistantResponse",
-                    importanceScore = 5,
-                    isConfirmed = true
-                )
-                memoryManager.storeStructuredMemory(entity, viewModelScope)
-            }
-        }
-    }
-
                         if (_uiState.value.currentMode == AppMode.VOICE) {
                             if (!responseAudio.isNullOrEmpty()) {
                                 activeAudioPipeline = ResponseAudioPipeline.AUDIO_TRACK
@@ -3608,5 +3592,19 @@ $tempo beats per minute, fading out...
         // Auto-close pipeline visualization overlay after 4 seconds
         delay(4000)
         _uiState.update { it.copy(showPipelineOverlay = false) }
+    }
+
+    private fun extractAndStoreMemories(userPrompt: String, assistantResponse: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            if (userPrompt.contains("remember", ignoreCase = true) || userPrompt.contains("prefer", ignoreCase = true)) {
+                val entity = MemoryEntity(
+                    category = "PREFERENCE",
+                    summary = "User stated: $userPrompt - Assistant response: $assistantResponse",
+                    importanceScore = 5,
+                    isConfirmed = true
+                )
+                memoryManager.storeStructuredMemory(entity, viewModelScope)
+            }
+        }
     }
 }
