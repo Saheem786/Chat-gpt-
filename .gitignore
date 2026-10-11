@@ -16,3 +16,10 @@
 local.properties
 .env
 debug.keystore
+
+# Signing credentials and private keystores
+*.jks
+*.keystore
+*.p12
+*.pfx
+key.properties
