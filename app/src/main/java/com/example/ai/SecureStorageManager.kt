@@ -14,6 +14,7 @@ class SecureStorageManager(context: Context) {
         private const val KEY_AI_PROVIDER = "ai_provider" // "GEMINI" or "NINEROUTER"
         private const val KEY_NINEROUTER_BASE_URL = "ninerouter_base_url"
         private const val KEY_NINEROUTER_MODEL = "ninerouter_model"
+        private const val KEY_DID_API_KEY = "did_api_key"
     }
 
     private val sharedPreferences: SharedPreferences by lazy {
@@ -64,5 +65,13 @@ class SecureStorageManager(context: Context) {
 
     fun setNineRouterModel(model: String) {
         sharedPreferences.edit().putString(KEY_NINEROUTER_MODEL, model.trim()).apply()
+    }
+
+    fun getDidApiKey(): String {
+        return sharedPreferences.getString(KEY_DID_API_KEY, "") ?: ""
+    }
+
+    fun setDidApiKey(key: String) {
+        sharedPreferences.edit().putString(KEY_DID_API_KEY, key.trim()).apply()
     }
 }

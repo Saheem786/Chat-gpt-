@@ -130,7 +130,9 @@ data class SamUiState(
     val selectedLanguage: AssistantLanguage = AssistantLanguage.ENGLISH_US,
     val engineMode: AiEngineMode = AiEngineMode.QUICK,
     val showSettingsDrawer: Boolean = false,
-    val ttsVoiceStyle: String = "FEMALE"
+    val ttsVoiceStyle: String = "FEMALE",
+    val showModelWebView: Boolean = false,
+    val modelWebViewUrl: String = "https://www.meshy.ai/3d-models/Modern-Muse-in-Blue-Light-01a12c74-a3dd-76e7-85e2-72b2d597bc97"
 )
 
 enum class VoiceState {
@@ -1771,6 +1773,11 @@ class SamViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(showToolsSheet = show) }
     }
 
+    fun toggleModelWebView(show: Boolean, url: String? = null) {
+        _uiState.update { it.copy(showModelWebView = show, modelWebViewUrl = url ?: it.modelWebViewUrl) }
+        addLog("Toggled Model WebView: $show")
+    }
+
     fun togglePersonalIntelligence(enabled: Boolean) {
         _uiState.update { it.copy(personalIntelligenceEnabled = enabled) }
         addLog("Personal Intelligence setting set to: $enabled")
@@ -2259,6 +2266,31 @@ $tempo beats per minute, fading out...
     }
 
     private fun handleSystemActionCommand(text: String, lower: String): Boolean {
+        // 0. Show Modern Muse 3D Model WebView
+        if (lower.contains("show modern muse") || lower.contains("modern muse") || lower.contains("3d model")) {
+            val msg = "Loading your 3D model on the screen."
+            val actionMsg = ChatMessage(
+                sender = MessageSender.ASSISTANT,
+                text = msg,
+                isAction = true,
+                actionName = "show_modern_muse",
+                actionDetail = msg
+            )
+            viewModelScope.launch { chatRepository.saveMessage(actionMsg) }
+            if (_uiState.value.currentMode == AppMode.VOICE) {
+                ttsEngine?.speak(msg)
+            }
+            _uiState.update { 
+                it.copy(
+                    actionBanner = msg, 
+                    isSendingChat = false, 
+                    showModelWebView = true, 
+                    modelWebViewUrl = "https://www.meshy.ai/3d-models/Modern-Muse-in-Blue-Light-01a12c74-a3dd-76e7-85e2-72b2d597bc97"
+                ) 
+            }
+            return true
+        }
+
         // 1. Toggling Wi-Fi (Voice commands: "turn on wifi", "turn off wifi", "toggle wifi", "wifi on karo", "wifi band karo", "enable wifi", "disable wifi")
         val isWifiQuery = lower.contains("wifi") || lower.contains("wi-fi")
         if (isWifiQuery && (lower.contains("on") || lower.contains("off") || lower.contains("turn") ||

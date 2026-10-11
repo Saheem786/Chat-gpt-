@@ -1,95 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.jarvis">
 
-    <!-- Essential Permissions: Voice Recognition, Network Connectivity, System Alarms & Foreground Wake Word Detection -->
-    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <uses-permission android:name="android.permission.VIBRATE" />
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
-    <uses-permission android:name="android.permission.SEND_SMS" />
-    <uses-permission android:name="android.permission.CALL_PHONE" />
-
-    <!-- Queries strictly for Speech Recognizer -->
-    <queries>
-        <intent>
-            <action android:name="android.speech.RecognitionService" />
-        </intent>
-    </queries>
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:allowBackup="true"
-        android:dataExtractionRules="@xml/data_extraction_rules"
-        android:fullBackupContent="@xml/backup_rules"
-        android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
-        android:roundIcon="@mipmap/ic_launcher_round"
-        android:supportsRtl="true"
-        android:theme="@style/Theme.MyApplication">
-        <activity
-            android:name=".MainActivity"
-            android:exported="true"
-            android:label="@string/app_name"
-            android:theme="@style/Theme.MyApplication"
-            android:windowSoftInputMode="adjustResize">
+        android:theme="@style/Theme.AppCompat.Light.NoActionBar">
+        <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <!-- Always-On Keyword Spotter Foreground Service -->
-        <service
-            android:name=".audio.SamWakeWordService"
-            android:exported="false"
-            android:foregroundServiceType="microphone" />
-
-        <!-- Floating Assistant Overlay Service -->
-        <service
-            android:name=".ui.JarvisFloatingWidgetService"
-            android:exported="false" />
-
-        <!-- JARVIS Notification Reader Service -->
-        <service
-            android:name=".system.SamNotificationListener"
-            android:label="JARVIS Notification Reader"
-            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.service.notification.NotificationListenerService" />
-            </intent-filter>
-        </service>
-
-        <!-- JARVIS Screen Context Accessibility Service -->
-        <service
-            android:name=".system.SamScreenContextService"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
-            android:label="JARVIS Screen Reader &amp; Vision"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.accessibilityservice.AccessibilityService" />
-            </intent-filter>
-            <meta-data
-                android:name="android.accessibilityservice"
-                android:resource="@xml/accessibility_service_config" />
-        </service>
-
-        <!-- Sam Proactive Broadcast Receiver -->
-        <receiver android:name=".receivers.SamProactiveReceiver" android:exported="false">
-            <intent-filter>
-                <action android:name="android.intent.action.USER_PRESENT" />
-                <action android:name="android.intent.action.BATTERY_LOW" />
-            </intent-filter>
-        </receiver>
     </application>
-
 </manifest>

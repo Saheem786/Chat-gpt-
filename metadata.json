@@ -1,6 +1,6 @@
 {
-  "name": "JARVIS AI",
-  "description": "JARVIS AI Voice Assistant - Real-time conversational voice assistant with natural multi-language speech, device actions, and contacts calling.",
+  "name": "Jarvis Avatar",
+  "description": "An AI assistant with a lip-syncing avatar.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

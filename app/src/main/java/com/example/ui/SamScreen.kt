@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -939,6 +940,68 @@ fun SamScreen(
                 viewModel.setVideoGenMode(true, option.id)
                 viewModel.setAppMode(AppMode.CHAT)
                 viewModel.updateInputText("[Mode: AI Video Generation - Duration: ${option.title}] ")
+            }
+        )
+    }
+
+    // Modern Muse 3D Model WebView Dialog
+    if (uiState.showModelWebView) {
+        AlertDialog(
+            onDismissRequest = { viewModel.toggleModelWebView(false) },
+            containerColor = SamSurfaceElevated,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(550.dp)
+                .border(1.5.dp, SamCyan.copy(alpha = 0.5f), RoundedCornerShape(28.dp)),
+            title = {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.CameraAlt,
+                            contentDescription = "3D Model",
+                            tint = SamCyan,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Modern Muse 3D Model",
+                            color = SamTextPrimary,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    IconButton(onClick = { viewModel.toggleModelWebView(false) }) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Close",
+                            tint = SamTextSecondary
+                        )
+                    }
+                }
+            },
+            text = {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(420.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color.Black)
+                ) {
+                    ModelWebViewComponent(
+                        modifier = Modifier.fillMaxSize(),
+                        isVisible = true,
+                        url = uiState.modelWebViewUrl
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { viewModel.toggleModelWebView(false) }) {
+                    Text("Close", color = SamCyan, fontWeight = FontWeight.Bold)
+                }
             }
         )
     }
