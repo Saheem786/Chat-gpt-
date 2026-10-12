@@ -9,6 +9,7 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.widget.Button
 import android.widget.TextView
 import android.widget.VideoView
@@ -22,15 +23,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var statusText: TextView
     private lateinit var btnListen: Button
     private lateinit var avatarVideoView: VideoView
+    private lateinit var visualizer: VoiceVisualizer
     private lateinit var speechRecognizer: SpeechRecognizer
     private lateinit var tts: TextToSpeech
     private val wakeWord = "jarvis"
     private val executor = Executors.newSingleThreadExecutor()
 
-    // API KEY DAALEIN: Yahan apni Gemini API key paste karein
     private val GEMINI_API_KEY = "YOUR_GEMINI_API_KEY_HERE"
-
-    // Yahan maine aapka diya hua link add kar diya hai
     private val avatarImgUrl = "https://i.postimg.cc/WhJXDqht/image.jpg"
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -40,6 +39,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         statusText = findViewById(R.id.statusText)
         btnListen = findViewById(R.id.btnListen)
         avatarVideoView = findViewById(R.id.avatarVideoView)
+        visualizer = findViewById(R.id.visualizer)
         
         tts = TextToSpeech(this, this)
 
@@ -56,7 +56,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private val recognitionListener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) { statusText.text = "Listening..." }
         override fun onBeginningOfSpeech() {}
-        override fun onRmsChanged(rmsdB: Float) {}
+        override fun onRmsChanged(rmsdB: Float) {
+            visualizer.setAmplitude(rmsdB / 10f)
+        }
         override fun onBufferReceived(buffer: ByteArray?) {}
         override fun onEndOfSpeech() { statusText.text = "Processing..." }
         override fun onError(error: Int) { statusText.text = "STT error: $error" }
@@ -129,6 +131,17 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (status == TextToSpeech.SUCCESS) {
             tts.language = Locale.getDefault()
             tts.setSpeechRate(1.0f)
+            tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {
+                    runOnUiThread { visualizer.setAmplitude(0.5f) }
+                }
+                override fun onDone(utteranceId: String?) {
+                    runOnUiThread { visualizer.setAmplitude(0f) }
+                }
+                override fun onError(utteranceId: String?) {
+                    runOnUiThread { visualizer.setAmplitude(0f) }
+                }
+            })
         }
     }
 
