@@ -20,6 +20,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import java.util.Locale
 import java.util.concurrent.Executors
+import com.example.jarvis.BuildConfig
 
 class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var statusText: TextView
@@ -31,7 +32,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private val wakeWord = "jarvis"
     private val executor = Executors.newSingleThreadExecutor()
 
-    private val GEMINI_API_KEY = "YOUR_GEMINI_API_KEY_HERE"
+    private val GEMINI_API_KEY = BuildConfig.GEMINI_API_KEY
     private val avatarImgUrl = "https://i.postimg.cc/WhJXDqht/image.jpg"
     private lateinit var glowAnimation: Animation
 
@@ -82,6 +83,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             if (!spokenLower.contains(wakeWord)) {
                 speak("Say Jarvis followed by your command.")
                 return
+            }
+
+            // Apply entry animation
+            runOnUiThread {
+                val entryAnim = AnimationUtils.loadAnimation(this@MainActivity, R.anim.avatar_entry)
+                avatarVideoView.startAnimation(entryAnim)
             }
 
             val idx = spokenLower.indexOf(wakeWord)
@@ -147,7 +154,18 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun speak(text: String) {
-        if (text.isNotBlank()) tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "jarvis_utterance")
+        if (text.isNotBlank()) {
+            val prefs = getSharedPreferences("JarvisPrefs", Context.MODE_PRIVATE)
+            val rate = prefs.getFloat("rate", 1.0f)
+            val pitch = prefs.getFloat("pitch", 1.0f)
+            tts.setSpeechRate(rate)
+            tts.setPitch(pitch)
+            tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "jarvis_utterance")
+        }
+    }
+
+    private fun openSettings() {
+        startActivity(Intent(this, SettingsActivity::class.java))
     }
 
     override fun onInit(status: Int) {
