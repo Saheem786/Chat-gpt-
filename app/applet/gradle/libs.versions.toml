@@ -1,6 +1,6 @@
 [versions]
-agp = "8.2.0"
-kotlin = "1.9.20"
+agp = "8.1.0"
+kotlin = "1.9.0"
 retrofit = "2.9.0"
 moshi = "1.15.0"
 room = "2.6.1"
@@ -11,6 +11,7 @@ coroutines = "1.7.3"
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+google-devtools-ksp = { id = "com.google.devtools.ksp", version = "1.9.0-1.0.13" }
 
 [libraries]
 retrofit = { group = "com.squareup.retrofit2", name = "retrofit", version.ref = "retrofit" }
